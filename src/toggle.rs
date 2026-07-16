@@ -27,19 +27,24 @@ pub fn toggle() -> i32 {
     };
     let _ = std::fs::create_dir_all(state::state_dir());
     let log = state::state_dir().join(format!("{}.log", state::sanitize_pane_id(&pane_id)));
-    let out = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log)
-        .ok();
 
+    // Default both streams to null: a detached watcher must NEVER inherit the
+    // caller's tty (Command's default for an unset stream is inherit()).
+    // Upgrade to the log file only when it is fully available.
     let mut cmd = Command::new(exe);
-    cmd.arg("watch").arg(&pane_id).stdin(Stdio::null());
-    if let Some(f) = out {
-        let f2 = f.try_clone().ok();
-        cmd.stdout(Stdio::from(f));
-        if let Some(f2) = f2 {
-            cmd.stderr(Stdio::from(f2));
+    cmd.arg("watch").arg(&pane_id)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+        match f.try_clone() {
+            Ok(f2) => {
+                cmd.stdout(Stdio::from(f));
+                cmd.stderr(Stdio::from(f2));
+            }
+            Err(_) => {
+                cmd.stdout(Stdio::from(f)); // stderr stays null
+            }
         }
     }
     unsafe {
