@@ -246,7 +246,7 @@ Semantics the tests below lock in:
 mod tests {
     use super::*;
     use crate::consts::{RENEW_INTERVAL, STOP_GRACE};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn active_only_for_working_and_blocked() {
@@ -305,6 +305,19 @@ mod tests {
         // back to active before grace fires: no new open (espresso still up), grace cancelled
         assert_eq!(m.on_status(true, t0), vec![]);
         assert_eq!(m.next_deadline(), Some(t0 + RENEW_INTERVAL));
+    }
+
+    #[test]
+    fn inactive_does_not_surface_stale_renew_deadline() {
+        // Deactivating shortly before a scheduled renew must expose only the
+        // stop-grace deadline, not the (suppressed) renew — otherwise the
+        // scheduler wakes on a deadline that fires nothing and stalls.
+        let t0 = Instant::now();
+        let mut m = Machine::new();
+        m.on_status(true, t0); // next_renew = t0 + RENEW_INTERVAL
+        let t1 = t0 + Duration::from_secs(58);
+        m.on_status(false, t1); // pending_stop = t1 + STOP_GRACE
+        assert_eq!(m.next_deadline(), Some(t1 + STOP_GRACE));
     }
 }
 ```
@@ -381,10 +394,12 @@ impl Machine {
     }
 
     pub fn next_deadline(&self) -> Option<Instant> {
-        [self.pending_stop, self.next_renew]
-            .into_iter()
-            .flatten()
-            .min()
+        // While inactive, next_renew is retained (so reactivation resumes the
+        // original schedule) but must NOT surface as a deadline — the renew
+        // action is suppressed by `on_timer`'s `if self.active` guard, so a
+        // visible renew deadline would fire nothing and stall in the past.
+        let renew = if self.active { self.next_renew } else { None };
+        [self.pending_stop, renew].into_iter().flatten().min()
     }
 }
 ```
