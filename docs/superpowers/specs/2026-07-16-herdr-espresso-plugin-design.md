@@ -41,6 +41,14 @@ plugin drives it; it does not vendor or link espresso's source.
 - **Plugin id:** `espresso`. Action invoked as `espresso.toggle`.
 - **Debounce:** include a stop-grace before closing espresso (default ~5s) to
   avoid flapping when status briefly drops to idle/done. Opening is immediate.
+- **espresso lifetime = short lease + renewal, not one long process.** The
+  watcher holds a short-lived `espresso -t <LEASE>` and renews it by process
+  rotation before it expires. This bounds any leak to the lease window if the
+  watcher dies unexpectedly (self-healing) and keeps the model detach-safe.
+  espresso has no "extend timer" verb — each process's `-t` is fixed at launch —
+  so renewal is necessarily spawning a fresh process and killing the old one,
+  not extending in place. Constants: `LEASE = 90s`, `RENEW_INTERVAL = 60s`,
+  `STOP_GRACE = 5s` (fixed in v1, no config surface).
 
 ## Key facts established about the platforms
 
@@ -79,9 +87,10 @@ plugin drives it; it does not vendor or link espresso's source.
   releases everything; espresso needs no special signal handling from us.
 - Lid-closed keep-awake requires the root launchd helper (`espresso daemon
   install`, one-time sudo). Without it, only idle-sleep is prevented.
-- To hold indefinitely we spawn `espresso -t <large>` (e.g. 100 days) and kill
-  it to close. If the child exits while the pane is still working, the watcher
-  respawns it.
+- Keep-awake is continuous as long as **at least one** espresso process is alive
+  at any instant, because each process holds its own assertion and its own
+  daemon refcount. This is what makes lease renewal by process rotation gap-free
+  (see "Lease and renewal").
 
 ## Architecture — per-pane watcher subprocess
 
@@ -104,8 +113,12 @@ Single binary `herdr-espresso` with clap subcommands:
 2. Look up `$HERDR_PLUGIN_STATE_DIR/<sanitized pane_id>.json` (watcher pid).
    - Exists and alive → **toggle off**: `SIGTERM` the watcher, remove the
      pidfile. The watcher's shutdown kills espresso and clears the marker.
-   - Otherwise → **toggle on**: spawn a detached `herdr-espresso watch
-     <pane_id>`, write the pidfile.
+   - Exists but **not alive (stale)** → reconcile: treat as off, remove the
+     stale pidfile, then proceed as toggle-on.
+   - Otherwise → **toggle on**: spawn the watcher fully detached (`setsid`, new
+     session, stdio redirected to a log file under `HERDR_PLUGIN_STATE_DIR`), so
+     client detach / terminal close never `SIGHUP`s it. Write the pidfile only
+     after confirming the process is still alive a moment later.
 3. Emit a herdr notification reflecting the new state.
 
 ### watch flow (core)
@@ -114,25 +127,55 @@ Single binary `herdr-espresso` with clap subcommands:
    custom_status:"󰅶" }` (no ttl).
 3. `events.subscribe` for `pane.agent_status_changed` and `pane.closed` on this
    pane; then `pane.get` once to seed the initial status.
-4. Event loop (blocking, read line by line):
-   - status ∈ {`working`,`blocked`} → ensure the espresso child is running.
-   - status ∈ {idle/done/other} → after the stop-grace elapses, kill the
-     espresso child (keep watching). A return to working/blocked before the
-     grace expires cancels the pending close.
-   - `pane.closed` for this pane → kill espresso, clear the marker, remove the
-     pidfile, exit.
-   - socket EOF (herdr gone) → kill espresso, exit (marker is moot).
+4. Event loop — a single-threaded loop that unifies events and timers. Each
+   iteration computes the nearest pending deadline (next renew tick, or a
+   pending stop-grace expiry) and reads the socket with that timeout:
+   - Read returns an event:
+     - `pane.agent_status_changed`, status ∈ {`working`,`blocked`} → become
+       "active": cancel any pending stop-grace; if no espresso is running, run a
+       renew tick immediately to open one and start the renew cadence.
+     - status ∈ {idle/done/other} → become "inactive": arm a stop-grace timer
+       (`STOP_GRACE`). Returning to active before it fires cancels it.
+     - `pane.closed` for this pane → kill espresso, clear the marker, remove the
+       pidfile, exit.
+   - Read times out (a timer is due):
+     - renew tick due (while active) → rotate the lease (below).
+     - stop-grace due → kill espresso, stop the renew cadence (keep watching).
+   - Socket EOF (server gone, e.g. `herdr server stop`) → kill espresso, exit
+     (marker is moot).
 5. `SIGTERM` handler (toggle-off) → kill espresso, clear the marker via
    `pane.report_metadata { pane_id, source:"espresso", clear_custom_status:true
    }`, remove the pidfile, exit 0.
-6. espresso child = `espresso -t <large>`. Respawn if it dies while the pane is
-   still working/blocked.
-7. On startup, run `espresso daemon status`; if the helper is not installed,
+6. On startup, run `espresso daemon status`; if the helper is not installed,
    `notification.show` a one-time warning, then continue.
+
+### Lease and renewal
+The watcher tracks exactly one "current" espresso PID and renews by process
+rotation (espresso has no extend-timer verb):
+
+- **Renew tick** (fires every `RENEW_INTERVAL` while active):
+  1. Spawn a fresh `espresso -t <LEASE>` (detached) → `PID_new`.
+  2. Confirm `PID_new` did not immediately exit.
+  3. Success → `SIGKILL PID_old` (if any); `current = PID_new`; next tick at
+     `now + RENEW_INTERVAL`.
+  4. Spawn failed (espresso missing / transient) → keep `PID_old` (it protects
+     until its own expiry); `notification.show` once if espresso is missing;
+     retry in ~10s.
+- **Open** (inactive→active) → run a renew tick immediately, then keep the
+  cadence.
+- **Close** (stop-grace fired / `pane.closed` / `SIGTERM`) → `SIGKILL current`,
+  cancel the cadence.
+- **Gap-free:** the new process is spawned before the old is killed, and the old
+  still has `LEASE - RENEW_INTERVAL` (≥30s) remaining, so at least one espresso
+  is always alive and the daemon refcount never reaches 0.
+- **Self-healing:** if the watcher dies for any reason, `current` self-expires
+  within ≤`LEASE` (90s) and the Mac is freed automatically.
+- **Tidy:** spawn-then-kill keeps the steady state at ~1 process and refcount 1;
+  close kills the single tracked PID with nothing left to leak.
 
 ### Debounce
 - working↔blocked transitions never toggle espresso (both keep it open).
-- A single stop-grace timer (default ~5s, no env/config surface in v1) delays
+- A single stop-grace timer (`STOP_GRACE`, no env/config surface in v1) delays
   closing when status drops to a non-active state; reactivation cancels it.
 - Opening is immediate.
 
@@ -154,10 +197,12 @@ each watcher's `pane.closed` subscription (requirement 2's connected-close).
 - `src/state.rs` — pidfile read/write and pane-id → filename sanitization
   (`w1:p1` → `w1_p1`, non-`[A-Za-z0-9._-]` bytes percent-escaped to avoid
   collisions).
-- `src/espresso.rs` — spawn/kill the espresso child, `espresso daemon status`
-  probe.
-- `src/policy.rs` — pure function `desired_espresso(status) -> bool` (and the
-  debounce decision), unit-testable without a socket.
+- `src/espresso.rs` — spawn a leased `espresso -t <LEASE>` child, track the
+  current PID, rotate (spawn-then-kill) on renew, kill on close, and probe
+  `espresso daemon status`.
+- `src/policy.rs` — pure, socket-free, unit-testable decisions:
+  `active(status) -> bool` (working/blocked → true) and the timer/debounce state
+  machine (when to open, arm/cancel stop-grace, schedule the next renew).
 
 ## Project layout
 
@@ -227,15 +272,33 @@ description = "espresso: toggle monitor on focused pane"
   re-toggle.
 - herdr socket EOF mid-run → watcher cleans up and exits.
 
+## Lifecycle & detach safety
+
+herdr is client/server: `prefix+q` detaches only the client; the server, panes,
+agents, and the socket at `HERDR_SOCKET_PATH` keep running. `herdr server stop`
+tears the server down.
+
+- **Client detach / reattach** → the watcher's socket stays connected (no EOF);
+  it keeps managing espresso normally. This is intended: a background agent that
+  keeps working after you detach should keep the Mac awake. Because the watcher
+  is `setsid`-detached, the client's terminal closing never signals it.
+- **`herdr server stop` / server crash / reboot** → socket EOF → the (surviving,
+  detached) watcher kills espresso and exits.
+- **Watcher killed hard (SIGKILL / OOM)** → its current espresso lease
+  self-expires within ≤`LEASE` (90s); no indefinite leak.
+- **Stale state** → `toggle`/`status` reconcile dead-pid pidfiles.
+
 ## Testing
 
 - Unit (TDD where practical):
-  - `policy::desired_espresso` for each status.
-  - debounce decision (pending-close set/cancel across a simulated clock).
+  - `policy::active(status)` for each status (working/blocked → true).
+  - the timer/debounce state machine over a simulated clock: open on activate,
+    arm/cancel stop-grace, schedule renew ticks, close when grace fires.
   - `state` pane-id sanitization is readable and collision-free.
   - JSON-RPC request/response and event-line encode/decode.
 - Event-loop test against an in-memory / mock stream feeding scripted event
-  lines, asserting espresso open/close calls and metadata calls.
+  lines plus a controllable clock, asserting the espresso open/rotate/close
+  calls and the metadata set/clear calls.
 - Manual verification checklist (`docs/manual-test.md`) requiring a real herdr:
   toggle on/off, working→open, idle→close after grace, pane close cleanup,
   two panes independent, marker appears/disappears, helper-missing warning.
@@ -246,4 +309,5 @@ description = "espresso: toggle monitor on focused pane"
   self-cleanup; user re-toggles).
 - No per-pane configurable policies.
 - No autostart / event-hook bootstrap; monitoring is entirely toggle-driven.
-- No tunable env/config surface for grace periods (fixed defaults in v1).
+- No tunable env/config surface for the timing constants (`LEASE`,
+  `RENEW_INTERVAL`, `STOP_GRACE` are fixed in v1).
