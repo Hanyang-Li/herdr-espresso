@@ -1005,12 +1005,16 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **Files:**
 - Create: `src/watcher.rs`
-- Modify: `src/main.rs` (add `mod watcher;`, dispatch `Command::Watch`)
+- Modify: `src/main.rs` (add `mod watcher;`, dispatch `Command::Watch`),
+  `src/policy.rs` (add `Machine::note_rotate_failed` + a test)
 
 **Interfaces:**
 - Consumes: `policy::{Machine, Action, active}`, `herdr::{Rpc, Events,
-  NextLine}`, `espresso::EspressoCtl`, `state`, `consts`.
+  NextLine}`, `espresso::{EspressoCtl, EspressoError}`, `state`, `consts`.
 - Produces:
+  - `Machine::note_rotate_failed(&mut self, now: Instant)` — after a failed
+    espresso spawn, shortens the next renew to `now + RENEW_RETRY` so the
+    degraded path retries sooner than the normal cadence.
   - `fn run_loop<R: Rpc, E: Events, C: EspressoCtl>(pane_id: &str, rpc: &mut R,
     events: &mut E, esp: &mut C, now: impl FnMut() -> Instant, stop:
     &AtomicBool) -> ()` — the testable core.
@@ -1024,15 +1028,39 @@ Loop contract (locked by the test):
   - `NextLine::Line` → `status = rpc.pane_status(pane_id)`:
     - `Ok(None)` (pane gone) → break (cleanup).
     - `Ok(Some(s))` → `apply(machine.on_status(active(&s), now), esp, rpc,
-      pane_id)`.
+      &mut machine, now, ...)`.
     - `Err(_)` → treat as pane gone → break.
   - `NextLine::Timeout` → `apply(machine.on_timer(now), ...)`.
   - `NextLine::Eof` → break (cleanup).
   - between iterations, if `stop` is set → break (cleanup).
-- `apply(actions)`: for `RotateLease` call `esp.rotate()` (on `Err(NotFound)`
-  notify once via `rpc.notify`); for `KillEspresso` call `esp.kill()`.
+- `apply(actions)`: for `RotateLease` call `esp.rotate()` — `Ok` do nothing;
+  `Err(NotFound)` notify once via `rpc.notify` and `machine.note_rotate_failed(
+  now)`; `Err(Spawn)` `machine.note_rotate_failed(now)` (no notify). For
+  `KillEspresso` call `esp.kill()`.
 - cleanup (after loop): `esp.kill()`; `rpc.clear_marker(pane_id)` (best effort);
   `state::remove_pidfile(pane_id)`.
+
+Add to `src/policy.rs` (in this task) the method and a test:
+
+```rust
+    // in impl Machine
+    pub fn note_rotate_failed(&mut self, now: Instant) {
+        self.next_renew = Some(now + crate::consts::RENEW_RETRY);
+    }
+```
+
+```rust
+    // in policy tests
+    #[test]
+    fn note_rotate_failed_shortens_next_renew() {
+        use crate::consts::RENEW_RETRY;
+        let t0 = Instant::now();
+        let mut m = Machine::new();
+        m.on_status(true, t0);            // next_renew = t0 + RENEW_INTERVAL (60s)
+        m.note_rotate_failed(t0);         // shorten to t0 + RENEW_RETRY (10s)
+        assert_eq!(m.next_deadline(), Some(t0 + RENEW_RETRY));
+    }
+```
 
 - [ ] **Step 1: Write a failing mock-driven test**
 
@@ -1150,14 +1178,16 @@ pub fn run_loop<R: Rpc, E: Events, C: EspressoCtl>(
         match events.next_line(timeout) {
             NextLine::Line => match rpc.pane_status(pane_id) {
                 Ok(Some(s)) => {
-                    let acts = machine.on_status(active(&s), now());
-                    apply(&acts, esp, rpc, &mut warned_missing);
+                    let n = now();
+                    let acts = machine.on_status(active(&s), n);
+                    apply(&acts, esp, rpc, &mut machine, n, &mut warned_missing);
                 }
                 Ok(None) | Err(_) => break, // pane gone or unreachable
             },
             NextLine::Timeout => {
-                let acts = machine.on_timer(now());
-                apply(&acts, esp, rpc, &mut warned_missing);
+                let n = now();
+                let acts = machine.on_timer(n);
+                apply(&acts, esp, rpc, &mut machine, n, &mut warned_missing);
             }
             NextLine::Eof => break,
         }
@@ -1173,12 +1203,17 @@ fn apply<R: Rpc, C: EspressoCtl>(
     actions: &[Action],
     esp: &mut C,
     rpc: &mut R,
+    machine: &mut Machine,
+    now: Instant,
     warned_missing: &mut bool,
 ) {
     for act in actions {
         match act {
-            Action::RotateLease => {
-                if let Err(EspressoError::NotFound) = esp.rotate() {
+            Action::RotateLease => match esp.rotate() {
+                Ok(()) => {}
+                Err(EspressoError::NotFound) => {
+                    // espresso missing: warn once, and retry sooner than the
+                    // normal renew cadence in case it appears on PATH.
                     if !*warned_missing {
                         *warned_missing = true;
                         let _ = rpc.notify(
@@ -1186,8 +1221,10 @@ fn apply<R: Rpc, C: EspressoCtl>(
                             "Install espresso and keep it on PATH.",
                         );
                     }
+                    machine.note_rotate_failed(now);
                 }
-            }
+                Err(EspressoError::Spawn(_)) => machine.note_rotate_failed(now),
+            },
             Action::KillEspresso => esp.kill(),
         }
     }
