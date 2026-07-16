@@ -1,6 +1,7 @@
 mod cli;
 mod consts;
 mod policy;
+mod state;
 
 use clap::Parser;
 use cli::{Cli, Command};
