@@ -64,7 +64,11 @@ pub fn try_reserve_pidfile(pane_id: &str) -> Reserve {
     use std::io::{ErrorKind, Write};
     let _ = std::fs::create_dir_all(state_dir());
     let path = pidfile(pane_id);
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
         Ok(mut f) => {
             // Write our own pid as the reservation sentinel so a racing
             // toggle-on sees a live owner (-> Busy) rather than an empty file
@@ -76,7 +80,11 @@ pub fn try_reserve_pidfile(pane_id: &str) -> Reserve {
             Some(pid) if pid_alive(pid) => Reserve::Busy,
             _ => {
                 let _ = std::fs::remove_file(&path);
-                match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                {
                     Ok(mut f) => {
                         let _ = write!(f, "{}", std::process::id());
                         Reserve::Reserved

@@ -45,11 +45,16 @@ pub fn toggle() -> i32 {
     // caller's tty (Command's default for an unset stream is inherit()).
     // Upgrade to the log file only when it is fully available.
     let mut cmd = Command::new(exe);
-    cmd.arg("watch").arg(&pane_id)
+    cmd.arg("watch")
+        .arg(&pane_id)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+    if let Ok(f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+    {
         match f.try_clone() {
             Ok(f2) => {
                 cmd.stdout(Stdio::from(f));

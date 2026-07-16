@@ -33,7 +33,9 @@ impl EspressoCtl for Lease {
     fn rotate(&mut self) -> Result<(), EspressoError> {
         let mut child = match Command::new("espresso").arg("-t").arg(lease_secs()).spawn() {
             Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(EspressoError::NotFound),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(EspressoError::NotFound)
+            }
             Err(e) => return Err(EspressoError::Spawn(e)),
         };
         // Confirm it did not immediately exit.
@@ -84,7 +86,10 @@ mod tests {
     #[test]
     fn kill_stops_a_spawned_child() {
         // Use `sleep` as a stand-in child we fully control.
-        let mut child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
         let pid = child.id() as i32;
         assert!(crate::state::pid_alive(pid));
         kill_pid(pid);

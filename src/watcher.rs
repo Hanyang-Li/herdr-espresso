@@ -140,6 +140,13 @@ pub fn watch(pane_id: &str) -> i32 {
         );
     }
 
-    run_loop(pane_id, &mut rpc, &mut events, &mut esp, Instant::now, &stop);
+    run_loop(
+        pane_id,
+        &mut rpc,
+        &mut events,
+        &mut esp,
+        Instant::now,
+        &stop,
+    );
     0
 }

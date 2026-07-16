@@ -2,10 +2,14 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use serde_json::json;
 use super::rpc::{request_line, HerdrError};
+use serde_json::json;
 
-pub enum NextLine { Line, Timeout, Eof }
+pub enum NextLine {
+    Line,
+    Timeout,
+    Eof,
+}
 
 pub trait Events {
     fn next_line(&mut self, timeout: Option<Duration>) -> NextLine;
@@ -27,13 +31,20 @@ pub struct SocketEvents {
 impl SocketEvents {
     pub fn subscribe(path: &str, pane_id: &str) -> Result<Self, HerdrError> {
         let mut stream = UnixStream::connect(path)?;
-        let sub = request_line("s1", "events.subscribe", json!({"subscriptions":[
-            {"type":"pane.agent_status_changed","pane_id": pane_id},
-            {"type":"pane.closed","pane_id": pane_id}
-        ]}));
+        let sub = request_line(
+            "s1",
+            "events.subscribe",
+            json!({"subscriptions":[
+                {"type":"pane.agent_status_changed","pane_id": pane_id},
+                {"type":"pane.closed","pane_id": pane_id}
+            ]}),
+        );
         stream.write_all(sub.as_bytes())?;
         stream.flush()?;
-        let mut me = Self { stream, buf: Vec::new() };
+        let mut me = Self {
+            stream,
+            buf: Vec::new(),
+        };
         // Consume the subscription ack line, bounded so a dead daemon can't
         // hang startup. Any bytes past the ack stay in `buf` for next_line.
         me.stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -68,8 +79,12 @@ impl Events for SocketEvents {
                         return NextLine::Line;
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut => return NextLine::Timeout,
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    return NextLine::Timeout
+                }
                 Err(_) => return NextLine::Eof,
             }
         }
