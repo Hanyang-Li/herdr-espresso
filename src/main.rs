@@ -1,9 +1,4 @@
 mod cli;
-mod consts;
-mod espresso;
-mod herdr;
-mod policy;
-mod state;
 
 use clap::Parser;
 use cli::{Cli, Command};
@@ -14,10 +9,7 @@ fn main() {
             eprintln!("toggle: not yet implemented");
             1
         }
-        Command::Watch { pane_id } => {
-            eprintln!("watch {pane_id}: not yet implemented");
-            1
-        }
+        Command::Watch { pane_id } => herdr_espresso::watcher::watch(&pane_id),
         Command::Status => {
             eprintln!("status: not yet implemented");
             1

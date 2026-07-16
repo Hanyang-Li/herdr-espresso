@@ -5,6 +5,10 @@ edition = "2021"
 description = "Keep macOS awake (incl. lid-closed) while a herdr pane's agent is working."
 license = "MIT"
 
+[lib]
+name = "herdr_espresso"
+path = "src/lib.rs"
+
 [[bin]]
 name = "herdr-espresso"
 path = "src/main.rs"

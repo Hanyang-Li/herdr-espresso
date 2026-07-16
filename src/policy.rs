@@ -61,6 +61,10 @@ impl Machine {
         vec![]
     }
 
+    pub fn note_rotate_failed(&mut self, now: Instant) {
+        self.next_renew = Some(now + crate::consts::RENEW_RETRY);
+    }
+
     pub fn next_deadline(&self) -> Option<Instant> {
         // While inactive, next_renew is retained (so reactivation resumes the
         // original schedule) but must NOT surface as a deadline — the renew
@@ -147,5 +151,15 @@ mod tests {
         let t1 = t0 + Duration::from_secs(58);
         m.on_status(false, t1); // pending_stop = t1 + STOP_GRACE
         assert_eq!(m.next_deadline(), Some(t1 + STOP_GRACE));
+    }
+
+    #[test]
+    fn note_rotate_failed_shortens_next_renew() {
+        use crate::consts::RENEW_RETRY;
+        let t0 = Instant::now();
+        let mut m = Machine::new();
+        m.on_status(true, t0); // next_renew = t0 + RENEW_INTERVAL (60s)
+        m.note_rotate_failed(t0); // shorten to t0 + RENEW_RETRY (10s)
+        assert_eq!(m.next_deadline(), Some(t0 + RENEW_RETRY));
     }
 }
