@@ -34,7 +34,7 @@ impl EspressoCtl for FakeEsp {
 
 #[test]
 fn working_then_pane_closed_opens_then_cleans_up() {
-    // Line#1: status=working -> rotate(open). Line#2: pane gone (None) -> break.
+    // Seed consumes first status (working -> rotate). First Line event's status read returns next scripted status (None) -> break.
     let mut events = FakeEvents { script: vec![NextLine::Line, NextLine::Line], i: 0 };
     let mut rpc = FakeRpc { statuses: vec![Some("working".into()), None], i:0, marker_cleared:false };
     let mut esp = FakeEsp::default();
