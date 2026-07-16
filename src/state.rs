@@ -47,6 +47,40 @@ pub fn pid_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+/// Outcome of trying to atomically claim a pane's pidfile.
+pub enum Reserve {
+    /// We created the pidfile; caller owns it and must write the pid or remove it.
+    Reserved,
+    /// A live watcher already owns it (lost a toggle-on race).
+    Busy,
+    /// Filesystem error.
+    Failed,
+}
+
+/// Atomically claim `pane_id`'s pidfile via O_EXCL so two concurrent toggle-on
+/// calls cannot both spawn a watcher. An existing file with a live pid is Busy;
+/// an empty/dead leftover is reclaimed.
+pub fn try_reserve_pidfile(pane_id: &str) -> Reserve {
+    use std::io::ErrorKind;
+    let _ = std::fs::create_dir_all(state_dir());
+    let path = pidfile(pane_id);
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(_) => Reserve::Reserved,
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => match read_pidfile(pane_id) {
+            Some(pid) if pid_alive(pid) => Reserve::Busy,
+            _ => {
+                let _ = std::fs::remove_file(&path);
+                match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                    Ok(_) => Reserve::Reserved,
+                    Err(e) if e.kind() == ErrorKind::AlreadyExists => Reserve::Busy,
+                    Err(_) => Reserve::Failed,
+                }
+            }
+        },
+        Err(_) => Reserve::Failed,
+    }
+}
+
 pub fn list_monitored() -> Vec<(String, i32)> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(state_dir()) else {

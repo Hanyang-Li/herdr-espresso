@@ -21,11 +21,24 @@ pub fn toggle() -> i32 {
         state::remove_pidfile(&pane_id); // stale
     }
 
+    // Atomically claim the pidfile so a concurrent toggle-on can't spawn a
+    // second, orphaned watcher that would hold espresso indefinitely.
+    match state::try_reserve_pidfile(&pane_id) {
+        state::Reserve::Reserved => {}
+        state::Reserve::Busy => {
+            println!("espresso: monitoring already on for {pane_id}");
+            return 0;
+        }
+        state::Reserve::Failed => return 1,
+    }
+
     let exe = match std::env::current_exe() {
         Ok(p) => p,
-        Err(_) => return 1,
+        Err(_) => {
+            state::remove_pidfile(&pane_id);
+            return 1;
+        }
     };
-    let _ = std::fs::create_dir_all(state::state_dir());
     let log = state::state_dir().join(format!("{}.log", state::sanitize_pane_id(&pane_id)));
 
     // Default both streams to null: a detached watcher must NEVER inherit the
@@ -55,14 +68,19 @@ pub fn toggle() -> i32 {
     }
     let child = match cmd.spawn() {
         Ok(c) => c,
-        Err(_) => return 1,
+        Err(_) => {
+            state::remove_pidfile(&pane_id);
+            return 1;
+        }
     };
     std::thread::sleep(std::time::Duration::from_millis(100));
     let pid = child.id() as i32;
     if !state::pid_alive(pid) {
+        state::remove_pidfile(&pane_id);
         return 1;
     }
     if state::write_pidfile(&pane_id, pid).is_err() {
+        state::remove_pidfile(&pane_id);
         return 1;
     }
     println!("espresso: monitoring on for {pane_id}");

@@ -45,3 +45,16 @@ fn working_then_pane_closed_opens_then_cleans_up() {
     assert_eq!(esp.kills, 1);        // killed during cleanup
     assert!(rpc.marker_cleared);     // marker cleared on cleanup
 }
+
+#[test]
+fn seeded_active_status_opens_lease_without_any_event() {
+    let mut events = FakeEvents { script: vec![], i: 0 }; // -> Eof immediately
+    let mut rpc = FakeRpc { statuses: vec![Some("working".into())], i: 0, marker_cleared: false };
+    let mut esp = FakeEsp::default();
+    let stop = AtomicBool::new(false);
+    let t0 = Instant::now();
+    run_loop("w1:p1", &mut rpc, &mut events, &mut esp, move || t0, &stop);
+    assert_eq!(esp.rotates, 1); // opened from the seed, no event needed
+    assert_eq!(esp.kills, 1);   // cleanup
+    assert!(rpc.marker_cleared);
+}

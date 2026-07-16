@@ -26,29 +26,48 @@ pub fn run_loop<R: Rpc, E: Events, C: EspressoCtl>(
     let mut machine = Machine::new();
     let mut warned_missing = false;
 
-    loop {
-        if stop.load(Ordering::Relaxed) {
-            break;
+    // Seed the initial status: herdr sends no state snapshot on subscribe, so
+    // without this a pane already working/blocked at toggle-on would not
+    // acquire a lease until its next status transition (which may never come).
+    let mut enter = true;
+    match rpc.pane_status(pane_id) {
+        Ok(Some(s)) => {
+            let n = now();
+            let acts = machine.on_status(active(&s), n);
+            apply(&acts, esp, rpc, &mut machine, n, &mut warned_missing);
         }
-        let timeout = match machine.next_deadline() {
-            Some(d) => d.saturating_duration_since(now()).min(POLL_CAP),
-            None => POLL_CAP,
-        };
-        match events.next_line(Some(timeout)) {
-            NextLine::Line => match rpc.pane_status(pane_id) {
-                Ok(Some(s)) => {
+        Ok(None) | Err(_) => enter = false, // pane gone/unreachable at start
+    }
+
+    // `while enter` triggers clippy::while_immutable_condition (deny-by-default:
+    // `enter` is never mutated in the loop body, only before it), so the
+    // single-entry gate is expressed as `if enter { loop { ... } }` instead.
+    // Every existing `break` and the loop body are otherwise unchanged.
+    if enter {
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let timeout = match machine.next_deadline() {
+                Some(d) => d.saturating_duration_since(now()).min(POLL_CAP),
+                None => POLL_CAP,
+            };
+            match events.next_line(Some(timeout)) {
+                NextLine::Line => match rpc.pane_status(pane_id) {
+                    Ok(Some(s)) => {
+                        let n = now();
+                        let acts = machine.on_status(active(&s), n);
+                        apply(&acts, esp, rpc, &mut machine, n, &mut warned_missing);
+                    }
+                    Ok(None) | Err(_) => break, // pane gone or unreachable
+                },
+                NextLine::Timeout => {
                     let n = now();
-                    let acts = machine.on_status(active(&s), n);
+                    let acts = machine.on_timer(n);
                     apply(&acts, esp, rpc, &mut machine, n, &mut warned_missing);
                 }
-                Ok(None) | Err(_) => break, // pane gone or unreachable
-            },
-            NextLine::Timeout => {
-                let n = now();
-                let acts = machine.on_timer(n);
-                apply(&acts, esp, rpc, &mut machine, n, &mut warned_missing);
+                NextLine::Eof => break,
             }
-            NextLine::Eof => break,
         }
     }
 
@@ -90,6 +109,14 @@ fn apply<R: Rpc, C: EspressoCtl>(
 }
 
 pub fn watch(pane_id: &str) -> i32 {
+    // Register SIGTERM handling FIRST so a toggle-off arriving during startup
+    // is caught (flag set) instead of killing us via the default disposition
+    // and bypassing cleanup.
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    if signal_hook::flag::register(signal_hook::consts::SIGTERM, stop.clone()).is_err() {
+        eprintln!("herdr-espresso: failed to register SIGTERM handler");
+    }
+
     let Some(sock) = crate::herdr::socket_path() else {
         eprintln!("HERDR_SOCKET_PATH not set");
         return 1;
@@ -112,9 +139,6 @@ pub fn watch(pane_id: &str) -> i32 {
             "Run `espresso daemon install` for lid-closed keep-awake.",
         );
     }
-
-    let stop = std::sync::Arc::new(AtomicBool::new(false));
-    let _ = signal_hook::flag::register(signal_hook::consts::SIGTERM, stop.clone());
 
     run_loop(pane_id, &mut rpc, &mut events, &mut esp, Instant::now, &stop);
     0
