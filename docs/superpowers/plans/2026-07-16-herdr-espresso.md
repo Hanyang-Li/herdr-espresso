@@ -1211,13 +1211,21 @@ Expected: FAIL — `run_loop` not defined.
 
 ```rust
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::consts::PLUGIN_ID;
 use crate::espresso::{EspressoCtl, EspressoError};
 use crate::herdr::{Events, NextLine, Rpc};
 use crate::policy::{active, Action, Machine};
 use crate::state;
+
+// Upper bound on how long a single `next_line` blocks, so the loop rechecks
+// `stop` (toggle-off / SIGTERM) promptly even when there is no timer deadline
+// (e.g. a pane that is idle at toggle-on: no lease, no pending stop). Without
+// this, a toggle-off while idle would leave the marker and pidfile until the
+// next pane event. Waking early is harmless: `on_timer` returns no actions
+// unless a deadline is actually due.
+const POLL_CAP: Duration = Duration::from_secs(1);
 
 pub fn run_loop<R: Rpc, E: Events, C: EspressoCtl>(
     pane_id: &str,
@@ -1234,10 +1242,11 @@ pub fn run_loop<R: Rpc, E: Events, C: EspressoCtl>(
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        let timeout = machine
-            .next_deadline()
-            .map(|d| d.saturating_duration_since(now()));
-        match events.next_line(timeout) {
+        let timeout = match machine.next_deadline() {
+            Some(d) => d.saturating_duration_since(now()).min(POLL_CAP),
+            None => POLL_CAP,
+        };
+        match events.next_line(Some(timeout)) {
             NextLine::Line => match rpc.pane_status(pane_id) {
                 Ok(Some(s)) => {
                     let n = now();
