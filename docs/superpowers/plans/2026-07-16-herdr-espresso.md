@@ -1624,3 +1624,28 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - **Placeholders:** none; every code step is complete. The single implementer
   note (Task 5 `daemon status` wording) is a verification-against-reality step,
   not a missing implementation — the warn-and-continue behavior is defined.
+
+---
+
+## Appendix: post-review fixes (applied during execution)
+
+Fixes found by task/final reviews that diverge from the task code blocks above.
+The committed source is authoritative; this records the deltas.
+
+- **policy `next_deadline`** suppresses `next_renew` while inactive (stale
+  deadline would fire nothing and stall). [Task 2 review]
+- **`SocketEvents`** buffers bytes in a struct field via a pure `take_line`
+  helper so a mid-line read timeout can't drop a partial event line. [Task 4]
+- **watcher `POLL_CAP`** (1s) caps `next_line` blocking so toggle-off/SIGTERM is
+  noticed promptly even with no timer deadline. [Task 6]
+- **`RENEW_RETRY`** wired via `Machine::note_rotate_failed`. [Task 6 plan]
+- **toggle stdio** defaults to `Stdio::null()`; upgrades to the log file only
+  when fully available (never inherits the caller tty). [Task 7]
+- **watcher seed:** `run_loop` reads `pane.get` once before the loop so an
+  already-working pane acquires a lease without waiting for an event; loop is
+  `if enter { loop { … } }`. [FINAL — Critical]
+- **atomic pidfile:** `state::try_reserve_pidfile` (O_EXCL, writes the owner's
+  own pid as sentinel) prevents a concurrent toggle-on from spawning a second,
+  orphaned watcher. [FINAL — Important]
+- **SIGTERM registered first** in `watch()`, before marker/daemon probe, so a
+  toggle-off during startup is caught and cleanup runs. [FINAL — Important]
