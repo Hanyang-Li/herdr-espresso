@@ -38,12 +38,15 @@ pub fn remove_pidfile(pane_id: &str) {
     let _ = std::fs::remove_file(pidfile(pane_id));
 }
 
+pub fn remove_pidfile_sanitized(sanitized: &str) {
+    let _ = std::fs::remove_file(state_dir().join(format!("{sanitized}.pid")));
+}
+
 pub fn pid_alive(pid: i32) -> bool {
     // kill(pid, 0) probes existence without sending a signal.
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-#[allow(dead_code)]
 pub fn list_monitored() -> Vec<(String, i32)> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(state_dir()) else {
