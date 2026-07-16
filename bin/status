@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# bin/status
+exec "${HERDR_PLUGIN_ROOT:?}/target/release/herdr-espresso" status "$@"

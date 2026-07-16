@@ -1,0 +1,21 @@
+id = "espresso"
+name = "Espresso Guard"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Keep macOS awake (incl. lid-closed) while a focused pane's agent is working."
+platforms = ["macos"]
+
+[[build]]
+command = ["cargo", "build", "--release"]
+
+[[actions]]
+id = "toggle"
+title = "Espresso: toggle monitor on focused pane"
+contexts = ["pane", "workspace", "global"]
+command = ["bash", "bin/toggle"]
+
+[[actions]]
+id = "status"
+title = "Espresso: list monitored panes"
+contexts = ["global"]
+command = ["bash", "bin/status"]

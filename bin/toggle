@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# bin/toggle
+exec "${HERDR_PLUGIN_ROOT:?}/target/release/herdr-espresso" toggle "$@"
