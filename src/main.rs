@@ -1,5 +1,6 @@
 mod cli;
 mod consts;
+mod espresso;
 mod herdr;
 mod policy;
 mod state;
