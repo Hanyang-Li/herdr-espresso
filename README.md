@@ -105,27 +105,6 @@ you run plugin actions (e.g. a command palette), since `toggle` supports the
   own `espresso` process; toggling or closing one pane has no effect on
   others.
 
-## Checking what's monitored
-
-The primary indicator is visual: any monitored pane shows the `espresso` marker in
-the herdr sidebar. No command needed.
-
-To list monitored panes from the CLI, run the `status` action through herdr.
-herdr captures a plugin action's stdout into its log rather than returning it
-inline, so it's two steps:
-
-```bash
-herdr plugin action invoke status --plugin espresso   # run it
-herdr plugin log list --plugin espresso               # read the `stdout` field
-```
-
-The output is either `no panes monitored` or one `monitoring: <pane> (watcher
-pid <n>)` line per monitored pane.
-
-(`herdr plugin action invoke`/`herdr plugin log list` are herdr's own commands;
-there is no `herdr-espresso` command on your `PATH` — the binary lives inside
-the installed plugin and is only ever run by herdr via the `bin/` wrappers.)
-
 ## License
 
 MIT — see `LICENSE`.
