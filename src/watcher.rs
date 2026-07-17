@@ -52,22 +52,27 @@ pub fn run_loop<R: Rpc, E: Events, C: EspressoCtl>(
                 Some(d) => d.saturating_duration_since(now()).min(POLL_CAP),
                 None => POLL_CAP,
             };
-            match events.next_line(Some(timeout)) {
-                NextLine::Line => match rpc.pane_status(pane_id) {
-                    Ok(Some(s)) => {
-                        let n = now();
-                        let acts = machine.on_status(active(&s), n);
-                        apply(&acts, esp, rpc, &mut machine, n, &mut warned_missing);
-                    }
-                    Ok(None) | Err(_) => break, // pane gone or unreachable
-                },
-                NextLine::Timeout => {
+            // An event wakes us early; otherwise we wake at POLL_CAP. Either
+            // way, re-read the authoritative status EVERY iteration: herdr does
+            // not reliably push a `pane.agent_status_changed` event to this
+            // subscription for every transition (and events are sparse when
+            // other panes are quiet), so relying on events alone made idle
+            // detection lag badly (espresso lingered ~30s). Polling each tick
+            // notices the change within ~POLL_CAP, then the stop-grace applies.
+            if matches!(events.next_line(Some(timeout)), NextLine::Eof) {
+                break;
+            }
+            match rpc.pane_status(pane_id) {
+                Ok(Some(s)) => {
                     let n = now();
-                    let acts = machine.on_timer(n);
+                    let acts = machine.on_status(active(&s), n);
                     apply(&acts, esp, rpc, &mut machine, n, &mut warned_missing);
                 }
-                NextLine::Eof => break,
+                Ok(None) | Err(_) => break, // pane gone or unreachable
             }
+            let n = now();
+            let acts = machine.on_timer(n);
+            apply(&acts, esp, rpc, &mut machine, n, &mut warned_missing);
         }
     }
 
