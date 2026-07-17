@@ -40,10 +40,10 @@ agent-status events over the herdr socket and holds (or releases) an
 
 ## Install
 
-Once published, install directly from GitHub:
+Install directly from GitHub:
 
 ```bash
-herdr plugin install <owner>/herdr-espresso
+herdr plugin install Hanyang-Li/herdr-espresso
 ```
 
 For local development, or to try this repo before it's published, link it
