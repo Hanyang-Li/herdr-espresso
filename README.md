@@ -68,7 +68,7 @@ herdr config to bind `espresso.toggle` to a key, for example:
 
 ```toml
 [[keys.command]]
-key = "prefix+shift+option+e"
+key = "prefix+shift+e"
 type = "plugin_action"
 command = "espresso.toggle"
 description = "espresso: toggle monitor on focused pane"

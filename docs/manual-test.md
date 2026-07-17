@@ -20,7 +20,7 @@ automated unit tests alone. Run them on macOS.
 
    ```toml
    [[keys.command]]
-   key = "prefix+shift+option+e"
+   key = "prefix+shift+e"
    type = "plugin_action"
    command = "espresso.toggle"
    description = "espresso: toggle monitor on focused pane"
@@ -32,7 +32,7 @@ automated unit tests alone. Run them on macOS.
 ## Checklist
 
 - [ ] **1. Toggle on + marker appears.** In a pane running an agent, focus
-      it and press `prefix+shift+option+e`. Confirm the `󰅶` marker appears
+      it and press `prefix+shift+e`. Confirm the `󰅶` marker appears
       next to the pane in the sidebar, and that a watcher is running:
       `herdr-espresso status` (or the `espresso.status` action) lists the
       pane with a live watcher pid.
@@ -52,7 +52,7 @@ automated unit tests alone. Run them on macOS.
       espresso assertion should be gone. The pane should still show as
       monitored (marker still present, watcher still running).
 
-- [ ] **4. Toggle off cleans up.** Press `prefix+shift+option+e` again on
+- [ ] **4. Toggle off cleans up.** Press `prefix+shift+e` again on
       that pane. Confirm: the `󰅶` marker disappears, `herdr-espresso status`
       no longer lists the pane, and there is no lingering `espresso` process
       for it (check `pmset -g assertions` and/or `ps aux | grep espresso`).
