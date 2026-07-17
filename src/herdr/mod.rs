@@ -2,7 +2,7 @@ pub mod events;
 pub mod rpc;
 
 pub use events::{PollWaiter, SocketEvents, Waiter, Wake};
-pub use rpc::{HerdrError, Rpc, SocketRpc};
+pub use rpc::{HerdrError, PaneState, Rpc, SocketRpc};
 
 pub fn socket_path() -> Option<String> {
     std::env::var("HERDR_SOCKET_PATH").ok()

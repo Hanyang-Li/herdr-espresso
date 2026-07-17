@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use crate::consts::PLUGIN_ID;
 use crate::espresso::{EspressoCtl, EspressoError};
-use crate::herdr::{Rpc, Waiter, Wake};
+use crate::herdr::{PaneState, Rpc, Waiter, Wake};
 use crate::policy::{active, Action, Machine};
 use crate::state;
 
@@ -25,13 +25,14 @@ pub fn run_loop<R: Rpc, W: Waiter, C: EspressoCtl>(
     // without this a pane already working/blocked at toggle-on would not
     // acquire a lease until its next status transition.
     let mut enter = true;
-    match rpc.pane_status(pane_id) {
-        Ok(Some(s)) => {
+    match rpc.pane_state(pane_id) {
+        Ok(PaneState::Agent(s)) => {
             let n = now();
             let acts = machine.on_status(active(&s), n);
             apply(&acts, esp, rpc, &mut machine, n, &mut warned_missing);
         }
-        Ok(None) | Err(_) => enter = false, // pane gone/unreachable at start
+        // No agent / pane gone / unreachable at start — nothing to monitor.
+        _ => enter = false,
     }
 
     if enter {
@@ -41,13 +42,16 @@ pub fn run_loop<R: Rpc, W: Waiter, C: EspressoCtl>(
                 .map(|d| d.saturating_duration_since(now()));
             match waiter.wait(timeout) {
                 Wake::Stop | Wake::Eof => break,
-                Wake::Event => match rpc.pane_status(pane_id) {
-                    Ok(Some(s)) => {
+                Wake::Event => match rpc.pane_state(pane_id) {
+                    Ok(PaneState::Agent(s)) => {
                         let n = now();
                         let acts = machine.on_status(active(&s), n);
                         apply(&acts, esp, rpc, &mut machine, n, &mut warned_missing);
                     }
-                    Ok(None) | Err(_) => break, // pane gone or unreachable
+                    // Agent exited (NoAgent), pane closed (Gone), or the socket
+                    // failed — stop monitoring. Cleanup below releases espresso
+                    // and clears the marker even though the pane stays open.
+                    Ok(PaneState::NoAgent) | Ok(PaneState::Gone) | Err(_) => break,
                 },
                 Wake::Timeout => {}
             }

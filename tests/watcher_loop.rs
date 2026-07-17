@@ -1,5 +1,5 @@
 use herdr_espresso::espresso::{EspressoCtl, EspressoError};
-use herdr_espresso::herdr::{HerdrError, Rpc, Waiter, Wake};
+use herdr_espresso::herdr::{HerdrError, PaneState, Rpc, Waiter, Wake};
 use herdr_espresso::watcher::run_loop;
 use std::time::{Duration, Instant};
 
@@ -17,13 +17,13 @@ impl Waiter for FakeWaiter {
 }
 
 struct FakeRpc {
-    statuses: Vec<Option<String>>,
+    states: Vec<PaneState>,
     i: usize,
     marker_cleared: bool,
 }
 impl Rpc for FakeRpc {
-    fn pane_status(&mut self, _p: &str) -> Result<Option<String>, HerdrError> {
-        let s = self.statuses.get(self.i).cloned().unwrap_or(None);
+    fn pane_state(&mut self, _p: &str) -> Result<PaneState, HerdrError> {
+        let s = self.states.get(self.i).cloned().unwrap_or(PaneState::Gone);
         self.i += 1;
         Ok(s)
     }
@@ -64,16 +64,20 @@ impl EspressoCtl for FakeEsp {
     }
 }
 
+fn working() -> PaneState {
+    PaneState::Agent("working".into())
+}
+
 #[test]
 fn seeded_working_opens_then_pane_closed_cleans_up() {
-    // Seed reads working -> rotate. First event's status read returns None
-    // (pane gone) -> break -> cleanup.
+    // Seed reads working -> rotate. First event's state is Gone (pane closed)
+    // -> break -> cleanup.
     let mut waiter = FakeWaiter {
         script: vec![Wake::Event],
         i: 0,
     };
     let mut rpc = FakeRpc {
-        statuses: vec![Some("working".into()), None],
+        states: vec![working(), PaneState::Gone],
         i: 0,
         marker_cleared: false,
     };
@@ -94,7 +98,7 @@ fn seeded_active_opens_without_any_event() {
         i: 0,
     };
     let mut rpc = FakeRpc {
-        statuses: vec![Some("working".into())],
+        states: vec![working()],
         i: 0,
         marker_cleared: false,
     };
@@ -115,7 +119,7 @@ fn stop_signal_closes_immediately() {
         i: 0,
     };
     let mut rpc = FakeRpc {
-        statuses: vec![Some("working".into())],
+        states: vec![working()],
         i: 0,
         marker_cleared: false,
     };
@@ -128,16 +132,37 @@ fn stop_signal_closes_immediately() {
 }
 
 #[test]
+fn agent_exit_closes_watcher_even_though_pane_stays_open() {
+    // The pane stays open but the agent exits -> pane.get reports NoAgent ->
+    // the watcher stops (cleanup releases espresso and clears the marker).
+    let mut waiter = FakeWaiter {
+        script: vec![Wake::Event],
+        i: 0,
+    };
+    let mut rpc = FakeRpc {
+        states: vec![working(), PaneState::NoAgent],
+        i: 0,
+        marker_cleared: false,
+    };
+    let mut esp = FakeEsp::default();
+    let t0 = Instant::now();
+    run_loop("w1:p1", &mut rpc, &mut waiter, &mut esp, move || t0);
+    assert_eq!(esp.rotates, 1); // opened from seed
+    assert_eq!(esp.kills, 1); // closed when the agent went away
+    assert!(rpc.marker_cleared); // marker removed on cleanup
+}
+
+#[test]
 fn idle_event_then_stop_grace_timer_closes() {
     // Working -> an idle event arms the 5s stop-grace (no immediate close);
     // a later timer wake (deadline elapsed) fires the close via on_timer, not
-    // via the final cleanup.
+    // via the final cleanup. Note: idle keeps monitoring (agent still present).
     let mut waiter = FakeWaiter {
         script: vec![Wake::Event, Wake::Timeout],
         i: 0,
     };
     let mut rpc = FakeRpc {
-        statuses: vec![Some("working".into()), Some("idle".into())],
+        states: vec![working(), PaneState::Agent("idle".into())],
         i: 0,
         marker_cleared: false,
     };
@@ -153,7 +178,7 @@ fn idle_event_then_stop_grace_timer_closes() {
     };
     run_loop("w1:p1", &mut rpc, &mut waiter, &mut esp, clock);
     assert_eq!(esp.rotates, 1); // opened from seed (working)
-                                // Closed by the stop-grace timer; cleanup kill is then a no-op, so a
-                                // count of exactly 1 proves the timer (not cleanup) did the close.
+                                // Closed by the stop-grace timer; the cleanup kill is then a no-op, so
+                                // exactly 1 proves the timer (not cleanup) did the close.
     assert_eq!(esp.kills, 1);
 }

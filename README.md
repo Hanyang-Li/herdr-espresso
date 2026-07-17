@@ -11,7 +11,9 @@ agent-status events over the herdr socket and holds (or releases) an
 
 ## What it does
 
-- Toggling monitoring on a pane starts a per-pane watcher.
+- Toggling monitoring on a pane starts a per-pane watcher. Only a pane that
+  currently has an agent can be monitored — toggling a plain shell is declined
+  with a notification (a shell has no working/idle state to track).
 - While monitored: when the pane's agent is `working` or `blocked`, the
   watcher holds an `espresso` lease so the Mac does not sleep (and, with the
   optional daemon installed, does not sleep even with the lid closed). When
@@ -22,7 +24,8 @@ agent-status events over the herdr socket and holds (or releases) an
 - Multiple panes can be monitored independently and simultaneously; each has
   its own watcher and its own `espresso` hold.
 - Closing a monitored pane stops its watcher, releases its `espresso`, and
-  removes the marker automatically.
+  removes the marker automatically. The same happens if the agent exits (the
+  pane returns to a plain shell) even though the pane itself stays open.
 
 ## Requirements
 

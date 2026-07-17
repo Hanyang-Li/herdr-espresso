@@ -24,17 +24,40 @@ pub fn request_line(id: &str, method: &str, params: Value) -> String {
     s
 }
 
-pub fn parse_pane_status(reply: &Value) -> Option<String> {
-    reply
-        .get("result")?
-        .get("pane")?
-        .get("agent_status")?
-        .as_str()
-        .map(str::to_string)
+/// A pane's monitoring-relevant state from `pane.get`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneState {
+    /// Pane does not exist / unreachable (pane.get returned an error).
+    Gone,
+    /// Pane exists but has no agent (a plain shell, or the agent has exited).
+    NoAgent,
+    /// Pane has an agent; carries its `agent_status` (working/blocked/idle/...).
+    Agent(String),
+}
+
+/// Distinguish agent-present from no-agent using the `agent` field (authoritative
+/// "is there an agent"), falling back to `agent_status` for the status string.
+pub fn parse_pane_state(reply: &Value) -> PaneState {
+    let Some(pane) = reply.get("result").and_then(|r| r.get("pane")) else {
+        return PaneState::Gone;
+    };
+    match pane.get("agent").and_then(Value::as_str) {
+        // `agent` present and non-empty -> a real agent occupies the pane.
+        Some(agent) if !agent.is_empty() => {
+            let status = pane
+                .get("agent_status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            PaneState::Agent(status)
+        }
+        // No `agent` field -> shell / agent exited.
+        _ => PaneState::NoAgent,
+    }
 }
 
 pub trait Rpc {
-    fn pane_status(&mut self, pane_id: &str) -> Result<Option<String>, HerdrError>;
+    fn pane_state(&mut self, pane_id: &str) -> Result<PaneState, HerdrError>;
     fn set_marker(&mut self, pane_id: &str) -> Result<(), HerdrError>;
     fn clear_marker(&mut self, pane_id: &str) -> Result<(), HerdrError>;
     fn notify(&mut self, title: &str, body: &str) -> Result<(), HerdrError>;
@@ -75,9 +98,9 @@ impl SocketRpc {
 }
 
 impl Rpc for SocketRpc {
-    fn pane_status(&mut self, pane_id: &str) -> Result<Option<String>, HerdrError> {
+    fn pane_state(&mut self, pane_id: &str) -> Result<PaneState, HerdrError> {
         let reply = self.call("pane.get", json!({"pane_id": pane_id}))?;
-        Ok(parse_pane_status(&reply))
+        Ok(parse_pane_state(&reply))
     }
     fn set_marker(&mut self, pane_id: &str) -> Result<(), HerdrError> {
         self.call(
@@ -119,18 +142,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_status_reads_agent_status() {
+    fn parse_state_agent_present() {
         let reply = json!({"id":"r1","result":{"type":"pane_info",
-            "pane":{"pane_id":"w1:p1","agent_status":"working"}}});
-        assert_eq!(parse_pane_status(&reply), Some("working".to_string()));
+            "pane":{"pane_id":"w1:p1","agent":"claude","agent_status":"working"}}});
+        assert_eq!(
+            parse_pane_state(&reply),
+            PaneState::Agent("working".to_string())
+        );
     }
 
     #[test]
-    fn parse_status_none_when_error_or_missing() {
+    fn parse_state_no_agent_when_agent_field_absent_or_null() {
+        // Plain shell / agent exited: herdr reports agent_status "unknown" and
+        // no `agent` field.
+        let shell = json!({"id":"r1","result":{"type":"pane_info",
+            "pane":{"pane_id":"w1:p1","agent_status":"unknown"}}});
+        assert_eq!(parse_pane_state(&shell), PaneState::NoAgent);
+        let null_agent = json!({"id":"r1","result":{"type":"pane_info",
+            "pane":{"pane_id":"w1:p1","agent":null,"agent_status":"unknown"}}});
+        assert_eq!(parse_pane_state(&null_agent), PaneState::NoAgent);
+    }
+
+    #[test]
+    fn parse_state_gone_on_error_reply() {
         let err = json!({"id":"r1","error":{"code":"not_found"}});
-        assert_eq!(parse_pane_status(&err), None);
-        let no_agent = json!({"id":"r1","result":{"type":"pane_info",
-            "pane":{"pane_id":"w1:p1"}}});
-        assert_eq!(parse_pane_status(&no_agent), None);
+        assert_eq!(parse_pane_state(&err), PaneState::Gone);
     }
 }

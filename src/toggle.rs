@@ -1,6 +1,7 @@
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
+use crate::herdr::{PaneState, Rpc};
 use crate::{herdr, state};
 
 pub fn toggle() -> i32 {
@@ -19,6 +20,32 @@ pub fn toggle() -> i32 {
             return 0;
         }
         state::remove_pidfile(&pane_id); // stale
+    }
+
+    // Toggle ON. Require an agent in the focused pane: a plain shell has
+    // nothing to monitor (its status is always "unknown"), so decline with a
+    // notification instead of creating a useless watcher.
+    let Some(sock) = herdr::socket_path() else {
+        eprintln!("HERDR_SOCKET_PATH not set");
+        return 1;
+    };
+    let mut rpc = match herdr::SocketRpc::connect(&sock) {
+        Ok(r) => r,
+        Err(_) => {
+            eprintln!("could not reach herdr socket");
+            return 1;
+        }
+    };
+    match rpc.pane_state(&pane_id) {
+        Ok(PaneState::Agent(_)) => {}
+        Ok(PaneState::NoAgent) => {
+            let _ = rpc.notify("espresso", "This pane has no agent — nothing to monitor.");
+            return 0;
+        }
+        Ok(PaneState::Gone) | Err(_) => {
+            let _ = rpc.notify("espresso", "Could not read the focused pane.");
+            return 1;
+        }
     }
 
     // Atomically claim the pidfile so a concurrent toggle-on can't spawn a
