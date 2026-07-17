@@ -17,7 +17,7 @@ agent-status events over the herdr socket and holds (or releases) an
   optional daemon installed, does not sleep even with the lid closed). When
   the agent goes `idle`/`done`, the watcher releases `espresso` after a short
   grace period.
-- A `󰅶` marker appears next to the pane in the herdr sidebar while it is
+- An `espresso` marker appears next to the pane in the herdr sidebar while it is
   monitored, and is removed when monitoring is toggled off.
 - Multiple panes can be monitored independently and simultaneously; each has
   its own watcher and its own `espresso` hold.
@@ -104,7 +104,7 @@ you run plugin actions (e.g. a command palette), since `toggle` supports the
 
 ## Checking what's monitored
 
-The primary indicator is visual: any monitored pane shows the `󰅶` marker in
+The primary indicator is visual: any monitored pane shows the `espresso` marker in
 the herdr sidebar. No command needed.
 
 To list monitored panes from the CLI, run the `status` action through herdr.
