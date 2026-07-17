@@ -1,31 +1,37 @@
 use std::io::{Read, Write};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use super::rpc::{request_line, HerdrError};
 use serde_json::json;
 
-pub enum NextLine {
-    Line,
+/// What woke a `Waiter`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wake {
+    /// herdr pushed one or more events on the subscription — re-snapshot status.
+    Event,
+    /// The stop signal fired (toggle-off / SIGTERM).
+    Stop,
+    /// A timer deadline elapsed with nothing else pending.
     Timeout,
+    /// The herdr event stream closed (server gone).
     Eof,
 }
 
-pub trait Events {
-    fn next_line(&mut self, timeout: Option<Duration>) -> NextLine;
+/// Blocks until something happens. This is the event-driven core: the thread is
+/// suspended by the kernel inside `poll()` and consumes no CPU until an event
+/// arrives, the stop signal fires, or the deadline elapses — there is no
+/// periodic polling.
+pub trait Waiter {
+    /// Wait until an event / stop / EOF, or until `timeout` elapses. `None`
+    /// blocks indefinitely (until event/stop/eof).
+    fn wait(&mut self, timeout: Option<Duration>) -> Wake;
 }
 
-/// Remove and return one '\n'-terminated line from the front of `buf`.
-/// Returns None if no complete line is buffered yet — partial bytes are left
-/// intact so they are not lost across reads.
-fn take_line(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
-    let pos = buf.iter().position(|&b| b == b'\n')?;
-    Some(buf.drain(..=pos).collect())
-}
-
+/// A subscribed event stream for one pane (one long-lived connection).
 pub struct SocketEvents {
     stream: UnixStream,
-    buf: Vec<u8>,
 }
 
 impl SocketEvents {
@@ -41,80 +47,92 @@ impl SocketEvents {
         );
         stream.write_all(sub.as_bytes())?;
         stream.flush()?;
-        let mut me = Self {
-            stream,
-            buf: Vec::new(),
+        // We never parse event payloads — any pushed bytes just mean
+        // "re-snapshot" — so switch to non-blocking and let poll()+drain handle
+        // the ack and every subsequent event uniformly. Non-blocking also means
+        // subscription setup can never hang startup.
+        stream.set_nonblocking(true)?;
+        Ok(Self { stream })
+    }
+
+    fn raw_fd(&self) -> RawFd {
+        self.stream.as_raw_fd()
+    }
+
+    /// Consume all currently-available bytes (ack and/or events) so `poll()`
+    /// won't immediately re-fire. Returns `false` on EOF (herdr closed).
+    fn drain(&mut self) -> bool {
+        let mut buf = [0u8; 4096];
+        loop {
+            match self.stream.read(&mut buf) {
+                Ok(0) => return false, // EOF
+                Ok(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return true,
+                Err(_) => return false,
+            }
+        }
+    }
+}
+
+/// Real `Waiter`: `poll()`s the herdr event socket and a self-pipe fed by the
+/// SIGTERM handler. Woken only by an actual event, the stop signal, or the
+/// deadline — no busy loop, no periodic wakeups.
+pub struct PollWaiter {
+    events: SocketEvents,
+    /// Read end of the self-pipe; SIGTERM writes a byte to its write end.
+    sig_read: UnixStream,
+}
+
+impl PollWaiter {
+    pub fn new(events: SocketEvents, sig_read: UnixStream) -> Self {
+        Self { events, sig_read }
+    }
+}
+
+impl Waiter for PollWaiter {
+    fn wait(&mut self, timeout: Option<Duration>) -> Wake {
+        let timeout_ms: libc::c_int = match timeout {
+            Some(d) => {
+                let ms = d.as_millis();
+                if ms > libc::c_int::MAX as u128 {
+                    libc::c_int::MAX
+                } else {
+                    ms as libc::c_int
+                }
+            }
+            None => -1,
         };
-        // Consume the subscription ack line, bounded so a dead daemon can't
-        // hang startup. Any bytes past the ack stay in `buf` for next_line.
-        me.stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        let mut chunk = [0u8; 4096];
-        loop {
-            if take_line(&mut me.buf).is_some() {
-                break;
-            }
-            match me.stream.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => me.buf.extend_from_slice(&chunk[..n]),
-                Err(_) => break,
-            }
+        let mut fds = [
+            libc::pollfd {
+                fd: self.events.raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: self.sig_read.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
+        if rc <= 0 {
+            // rc == 0: timeout. rc < 0: EINTR/error — re-evaluate on the next
+            // loop (a SIGTERM that interrupted poll shows up as the self-pipe
+            // being readable on the very next poll).
+            return Wake::Timeout;
         }
-        Ok(me)
-    }
-}
-
-impl Events for SocketEvents {
-    fn next_line(&mut self, timeout: Option<Duration>) -> NextLine {
-        if take_line(&mut self.buf).is_some() {
-            return NextLine::Line;
+        // Stop takes priority over events.
+        if fds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+            return Wake::Stop;
         }
-        let _ = self.stream.set_read_timeout(timeout);
-        let mut chunk = [0u8; 4096];
-        loop {
-            match self.stream.read(&mut chunk) {
-                Ok(0) => return NextLine::Eof,
-                Ok(n) => {
-                    self.buf.extend_from_slice(&chunk[..n]);
-                    if take_line(&mut self.buf).is_some() {
-                        return NextLine::Line;
-                    }
-                }
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::TimedOut =>
-                {
-                    return NextLine::Timeout
-                }
-                Err(_) => return NextLine::Eof,
+        if fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+            if self.events.drain() {
+                Wake::Event
+            } else {
+                Wake::Eof
             }
+        } else {
+            Wake::Timeout
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::take_line;
-
-    #[test]
-    fn take_line_returns_none_on_partial_and_retains_bytes() {
-        let mut buf = b"{\"partial\":".to_vec();
-        assert!(take_line(&mut buf).is_none());
-        assert_eq!(buf, b"{\"partial\":");
-    }
-
-    #[test]
-    fn take_line_extracts_one_line_and_keeps_the_rest() {
-        let mut buf = b"line1\nline2-partial".to_vec();
-        assert_eq!(take_line(&mut buf), Some(b"line1\n".to_vec()));
-        assert_eq!(buf, b"line2-partial");
-        assert!(take_line(&mut buf).is_none());
-    }
-
-    #[test]
-    fn take_line_handles_multiple_buffered_lines() {
-        let mut buf = b"a\nb\n".to_vec();
-        assert_eq!(take_line(&mut buf), Some(b"a\n".to_vec()));
-        assert_eq!(take_line(&mut buf), Some(b"b\n".to_vec()));
-        assert!(take_line(&mut buf).is_none());
     }
 }

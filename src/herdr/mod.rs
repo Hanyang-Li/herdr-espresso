@@ -1,7 +1,7 @@
 pub mod events;
 pub mod rpc;
 
-pub use events::{Events, NextLine, SocketEvents};
+pub use events::{PollWaiter, SocketEvents, Waiter, Wake};
 pub use rpc::{HerdrError, Rpc, SocketRpc};
 
 pub fn socket_path() -> Option<String> {

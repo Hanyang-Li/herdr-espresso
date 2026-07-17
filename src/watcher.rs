@@ -1,34 +1,29 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::os::unix::net::UnixStream;
+use std::time::Instant;
 
 use crate::consts::PLUGIN_ID;
 use crate::espresso::{EspressoCtl, EspressoError};
-use crate::herdr::{Events, NextLine, Rpc};
+use crate::herdr::{Rpc, Waiter, Wake};
 use crate::policy::{active, Action, Machine};
 use crate::state;
 
-// Upper bound on how long a single `next_line` blocks, so the loop rechecks
-// `stop` (toggle-off / SIGTERM) promptly even when there is no timer deadline
-// (e.g. a pane that is idle at toggle-on: no lease, no pending stop). Without
-// this, a toggle-off while idle would leave the marker and pidfile until the
-// next pane event. Waking early is harmless: `on_timer` returns no actions
-// unless a deadline is actually due.
-const POLL_CAP: Duration = Duration::from_secs(1);
-
-pub fn run_loop<R: Rpc, E: Events, C: EspressoCtl>(
+/// Per-pane event loop. Fully event-driven: it blocks in the `Waiter` (kernel
+/// `poll()`) until herdr pushes an event, the stop signal fires, or a timer
+/// deadline elapses — no periodic status polling. Status is re-read only when
+/// herdr pushes an event.
+pub fn run_loop<R: Rpc, W: Waiter, C: EspressoCtl>(
     pane_id: &str,
     rpc: &mut R,
-    events: &mut E,
+    waiter: &mut W,
     esp: &mut C,
     mut now: impl FnMut() -> Instant,
-    stop: &AtomicBool,
 ) {
     let mut machine = Machine::new();
     let mut warned_missing = false;
 
     // Seed the initial status: herdr sends no state snapshot on subscribe, so
     // without this a pane already working/blocked at toggle-on would not
-    // acquire a lease until its next status transition (which may never come).
+    // acquire a lease until its next status transition.
     let mut enter = true;
     match rpc.pane_status(pane_id) {
         Ok(Some(s)) => {
@@ -39,44 +34,34 @@ pub fn run_loop<R: Rpc, E: Events, C: EspressoCtl>(
         Ok(None) | Err(_) => enter = false, // pane gone/unreachable at start
     }
 
-    // `while enter` triggers clippy::while_immutable_condition (deny-by-default:
-    // `enter` is never mutated in the loop body, only before it), so the
-    // single-entry gate is expressed as `if enter { loop { ... } }` instead.
-    // Every existing `break` and the loop body are otherwise unchanged.
     if enter {
         loop {
-            if stop.load(Ordering::Relaxed) {
-                break;
+            let timeout = machine
+                .next_deadline()
+                .map(|d| d.saturating_duration_since(now()));
+            match waiter.wait(timeout) {
+                Wake::Stop | Wake::Eof => break,
+                Wake::Event => match rpc.pane_status(pane_id) {
+                    Ok(Some(s)) => {
+                        let n = now();
+                        let acts = machine.on_status(active(&s), n);
+                        apply(&acts, esp, rpc, &mut machine, n, &mut warned_missing);
+                    }
+                    Ok(None) | Err(_) => break, // pane gone or unreachable
+                },
+                Wake::Timeout => {}
             }
-            let timeout = match machine.next_deadline() {
-                Some(d) => d.saturating_duration_since(now()).min(POLL_CAP),
-                None => POLL_CAP,
-            };
-            // An event wakes us early; otherwise we wake at POLL_CAP. Either
-            // way, re-read the authoritative status EVERY iteration: herdr does
-            // not reliably push a `pane.agent_status_changed` event to this
-            // subscription for every transition (and events are sparse when
-            // other panes are quiet), so relying on events alone made idle
-            // detection lag badly (espresso lingered ~30s). Polling each tick
-            // notices the change within ~POLL_CAP, then the stop-grace applies.
-            if matches!(events.next_line(Some(timeout)), NextLine::Eof) {
-                break;
-            }
-            match rpc.pane_status(pane_id) {
-                Ok(Some(s)) => {
-                    let n = now();
-                    let acts = machine.on_status(active(&s), n);
-                    apply(&acts, esp, rpc, &mut machine, n, &mut warned_missing);
-                }
-                Ok(None) | Err(_) => break, // pane gone or unreachable
-            }
+            // Fire any timers now due (renew / stop-grace). Cheap and a no-op
+            // unless a deadline has actually passed.
             let n = now();
             let acts = machine.on_timer(n);
             apply(&acts, esp, rpc, &mut machine, n, &mut warned_missing);
         }
     }
 
-    // Cleanup (covers SIGTERM, pane close, and server gone).
+    // Cleanup — runs on every exit path (toggle-off/SIGTERM, pane close, server
+    // gone). Closing espresso here is immediate and never waits on the
+    // stop-grace, so toggle-off reacts at once.
     esp.kill();
     let _ = rpc.clear_marker(pane_id);
     state::remove_pidfile(pane_id);
@@ -114,11 +99,14 @@ fn apply<R: Rpc, C: EspressoCtl>(
 }
 
 pub fn watch(pane_id: &str) -> i32 {
-    // Register SIGTERM handling FIRST so a toggle-off arriving during startup
-    // is caught (flag set) instead of killing us via the default disposition
-    // and bypassing cleanup.
-    let stop = std::sync::Arc::new(AtomicBool::new(false));
-    if signal_hook::flag::register(signal_hook::consts::SIGTERM, stop.clone()).is_err() {
+    // Self-pipe for instant toggle-off: the SIGTERM handler writes a byte to
+    // `sig_write`; the watcher's poll() wakes on `sig_read` and cleans up at
+    // once — no periodic flag-polling, no wakeup latency.
+    let (sig_read, sig_write) = match UnixStream::pair() {
+        Ok(pair) => pair,
+        Err(_) => return 1,
+    };
+    if signal_hook::low_level::pipe::register(signal_hook::consts::SIGTERM, sig_write).is_err() {
         eprintln!("herdr-espresso: failed to register SIGTERM handler");
     }
 
@@ -130,13 +118,14 @@ pub fn watch(pane_id: &str) -> i32 {
         Ok(r) => r,
         Err(_) => return 1,
     };
-    let mut events = match crate::herdr::SocketEvents::subscribe(&sock, pane_id) {
+    let events = match crate::herdr::SocketEvents::subscribe(&sock, pane_id) {
         Ok(e) => e,
         Err(_) => return 1,
     };
+    let mut waiter = crate::herdr::PollWaiter::new(events, sig_read);
     let mut esp = crate::espresso::Lease::default();
 
-    // Marker on; one-time helper warning.
+    // Marker on; one-time helper warning if lid-closed isn't installed.
     let _ = rpc.set_marker(pane_id);
     if !crate::espresso::daemon_installed() {
         let _ = rpc.notify(
@@ -145,13 +134,6 @@ pub fn watch(pane_id: &str) -> i32 {
         );
     }
 
-    run_loop(
-        pane_id,
-        &mut rpc,
-        &mut events,
-        &mut esp,
-        Instant::now,
-        &stop,
-    );
+    run_loop(pane_id, &mut rpc, &mut waiter, &mut esp, Instant::now);
     0
 }
