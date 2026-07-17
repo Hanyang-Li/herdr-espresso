@@ -1,4 +1,4 @@
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 
 use crate::consts::LEASE;
 
@@ -31,7 +31,21 @@ pub struct Lease {
 
 impl EspressoCtl for Lease {
     fn rotate(&mut self) -> Result<(), EspressoError> {
-        let mut child = match Command::new("espresso").arg("-t").arg(lease_secs()).spawn() {
+        // Hold keep-awake via command mode (`espresso -- sleep <lease>`), NOT
+        // `espresso -t <lease>`: the `-t` timer draws a progress bar in raw
+        // mode and aborts with "failed to enable terminal raw mode" when run
+        // headless (as the watcher always is). Command mode holds the assertion
+        // without a TTY. The lease still bounds a dead watcher's hold: the
+        // orphaned `sleep` self-exits within `LEASE`, releasing espresso.
+        let mut child = match Command::new("espresso")
+            .arg("--")
+            .arg("sleep")
+            .arg(lease_secs())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(EspressoError::NotFound)

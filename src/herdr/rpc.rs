@@ -41,18 +41,19 @@ pub trait Rpc {
 }
 
 pub struct SocketRpc {
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
+    path: String,
     seq: u64,
 }
 
 impl SocketRpc {
     pub fn connect(path: &str) -> Result<Self, HerdrError> {
-        let stream = UnixStream::connect(path)?;
-        let reader = BufReader::new(stream.try_clone()?);
+        // herdr's API socket serves ONE request per connection and closes it
+        // after the response, so we cannot hold a connection open across calls
+        // — each `call` opens a fresh one. Probe once here so a bad socket path
+        // fails fast (and `watch` can bail before setting the marker).
+        UnixStream::connect(path)?;
         Ok(Self {
-            reader,
-            writer: stream,
+            path: path.to_string(),
             seq: 0,
         })
     }
@@ -60,12 +61,13 @@ impl SocketRpc {
     fn call(&mut self, method: &str, params: Value) -> Result<Value, HerdrError> {
         self.seq += 1;
         let id = format!("r{}", self.seq);
-        self.writer
-            .write_all(request_line(&id, method, params).as_bytes())?;
-        self.writer.flush()?;
-        // One-shot connection: the next line is our reply.
+        // Fresh connection per request (herdr closes it after one response).
+        let mut stream = UnixStream::connect(&self.path)?;
+        stream.write_all(request_line(&id, method, params).as_bytes())?;
+        stream.flush()?;
+        let mut reader = BufReader::new(stream);
         let mut line = String::new();
-        if self.reader.read_line(&mut line)? == 0 {
+        if reader.read_line(&mut line)? == 0 {
             return Err(HerdrError::Protocol("eof".into()));
         }
         serde_json::from_str(&line).map_err(|e| HerdrError::Protocol(e.to_string()))
