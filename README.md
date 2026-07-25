@@ -30,8 +30,9 @@ accordingly.
 - **Follows the agent.** No manual on/off — monitoring tracks the agent's state.
 - **Only agent panes.** Toggling a plain shell is declined with a notification
   (a shell has no working/idle state to track).
-- **Sidebar marker.** An `espresso` label appears next to a monitored pane and
-  disappears when monitoring stops.
+- **Sidebar marker.** An `espresso` label can appear next to a monitored pane
+  and disappears when monitoring stops — one line of herdr config away (see
+  [Sidebar marker](#sidebar-marker)).
 - **Self-healing.** `espresso` is held via a short lease renewed while the agent
   works, so a crashed watcher can never pin the Mac awake — the lease expires on
   its own within ~90s.
@@ -78,8 +79,37 @@ description = "espresso: toggle monitor on focused pane"
 ```
 
 Press it while an **agent** pane is focused to toggle monitoring for that pane.
-An `espresso` marker appears next to the pane in the sidebar while it's
-monitored. Toggling a pane with no agent is declined with a notification.
+Toggling a pane with no agent is declined with a notification.
+
+## Sidebar marker
+
+While a pane is monitored, the plugin reports an `espresso` **pane metadata
+token**. herdr renders a plugin token only where a sidebar row template asks for
+it by name, so add `$espresso` to your expanded agent rows:
+
+```toml
+[ui.sidebar.agents]
+rows = [["state_icon", "workspace", "tab"], ["agent", "$espresso"]]
+```
+
+Custom tokens must keep the `$` prefix — herdr rejects the row otherwise. A
+token occurrence can also be styled (herdr 0.7.5+):
+
+```toml
+rows = [["state_icon", "workspace", "tab"], ["agent", { token = "$espresso", dim = true }]]
+```
+
+Two things worth knowing:
+
+- A `rows_by_agent` entry **replaces** `rows` for that agent, so add the token
+  there too if you override rows per agent:
+  ```toml
+  [ui.sidebar.agents.rows_by_agent]
+  claude = [["state_icon", "workspace", "tab"], ["terminal_title_stripped"], ["agent", "$espresso"]]
+  ```
+- Without the row config, monitoring works exactly the same — there is just
+  nothing to see in the sidebar. `herdr server reload-config` reports any
+  mistake in the row template in its `diagnostics`.
 
 ## How it works
 
@@ -91,7 +121,7 @@ monitored. Toggling a pane with no agent is declined with a notification.
   before releasing `espresso`. Monitoring continues.
 - **Agent exit / pane close → stop.** If the pane closes, or the agent exits
   and the pane returns to a plain shell, the watcher stops on its own: it
-  releases `espresso` and removes the marker.
+  releases `espresso` and clears the marker token.
 - **Self-healing lease.** Because the lease is short and renewed rather than
   held open-ended, a watcher that dies unexpectedly (crash, `kill -9`) can't
   keep the Mac awake — its `espresso` lease expires within ~90 seconds.

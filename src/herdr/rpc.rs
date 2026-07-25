@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
-use crate::consts::{MARKER, METADATA_SOURCE};
+use crate::consts::{MARKER, MARKER_TOKEN, METADATA_SOURCE};
 
 #[derive(Debug)]
 pub enum HerdrError {
@@ -22,6 +22,19 @@ pub fn request_line(id: &str, method: &str, params: Value) -> String {
     .expect("serialize request");
     s.push('\n');
     s
+}
+
+/// Turn an `error` reply into an `Err`. The socket call itself succeeds when
+/// herdr rejects a request, so a caller that only checks transport errors
+/// treats a rejected request as done — how a marker that never once reached the
+/// sidebar looked healthy for weeks.
+pub fn reply_error(reply: &Value) -> Result<(), HerdrError> {
+    let Some(err) = reply.get("error") else {
+        return Ok(());
+    };
+    let code = err.get("code").and_then(Value::as_str).unwrap_or("error");
+    let msg = err.get("message").and_then(Value::as_str).unwrap_or("");
+    Err(HerdrError::Protocol(format!("{code}: {msg}")))
 }
 
 /// A pane's monitoring-relevant state from `pane.get`.
@@ -103,26 +116,30 @@ impl Rpc for SocketRpc {
         Ok(parse_pane_state(&reply))
     }
     fn set_marker(&mut self, pane_id: &str) -> Result<(), HerdrError> {
-        self.call(
+        let reply = self.call(
             "pane.report_metadata",
             json!({
-                "pane_id": pane_id, "source": METADATA_SOURCE, "custom_status": MARKER
+                "pane_id": pane_id, "source": METADATA_SOURCE,
+                "tokens": { MARKER_TOKEN: MARKER }
             }),
         )?;
-        Ok(())
+        reply_error(&reply)
     }
     fn clear_marker(&mut self, pane_id: &str) -> Result<(), HerdrError> {
-        self.call(
+        // A null value removes only our token, leaving tokens reported by other
+        // sources on the pane alone.
+        let reply = self.call(
             "pane.report_metadata",
             json!({
-                "pane_id": pane_id, "source": METADATA_SOURCE, "clear_custom_status": true
+                "pane_id": pane_id, "source": METADATA_SOURCE,
+                "tokens": { MARKER_TOKEN: Value::Null }
             }),
         )?;
-        Ok(())
+        reply_error(&reply)
     }
     fn notify(&mut self, title: &str, body: &str) -> Result<(), HerdrError> {
-        self.call("notification.show", json!({"title": title, "body": body}))?;
-        Ok(())
+        let reply = self.call("notification.show", json!({"title": title, "body": body}))?;
+        reply_error(&reply)
     }
 }
 
