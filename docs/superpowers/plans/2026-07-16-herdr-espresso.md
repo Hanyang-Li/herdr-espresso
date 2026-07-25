@@ -26,7 +26,9 @@ unit-testable without a real herdr or espresso.
 - `min_herdr_version = "0.7.0"`.
 - Plugin id: `espresso`. Toggle action id: `espresso.toggle`.
 - Metadata `source` string: `espresso` (ASCII `[A-Za-z0-9:._-]`, ≤80 chars).
-- Sidebar marker `custom_status`: `󰅶` (U+F0176; ≤32 chars).
+- Sidebar marker: pane metadata token `espresso` with value `espresso`
+  (token names must match `^[A-Za-z0-9_-]{1,32}$`). See the correction note
+  below — this originally said `custom_status`, a field herdr does not have.
 - Timing constants (fixed, no config surface in v1): `LEASE = 90s`,
   `RENEW_INTERVAL = 60s`, `STOP_GRACE = 5s`, renew retry on spawn failure `10s`.
 - "Active" agent statuses (keep espresso open): `working`, `blocked`. Everything
@@ -604,9 +606,18 @@ Wire formats (verbatim from herdr socket-api):
   {"type":"pane.agent_status_changed","pane_id":"w1:p1"},
   {"type":"pane.closed","pane_id":"w1:p1"}]}}`
 - `report_metadata` set: `{"id":"r2","method":"pane.report_metadata","params":{
-  "pane_id":"w1:p1","source":"espresso","custom_status":"󰅶"}}`
-- `report_metadata` clear: same but `"clear_custom_status":true` and no
-  `custom_status`.
+  "pane_id":"w1:p1","source":"espresso","tokens":{"espresso":"espresso"}}}`
+- `report_metadata` clear: same but `"tokens":{"espresso":null}` — a null value
+  removes only our token.
+
+> **Correction (2026-07-26).** This plan originally specified `custom_status` /
+> `clear_custom_status` for the marker. herdr has no such fields: every call was
+> rejected with `invalid_metadata_request: missing metadata field to set or
+> clear`, the two call sites discarded the error, and the marker never once
+> rendered. The field names were assumed while writing this plan and never
+> checked against a live server — confirm herdr param names against
+> `herdr api schema --json` first. Rendering also needs the user's config to name
+> the token as `$espresso` in `ui.sidebar.agents.rows`; see the README.
 - `notification.show`: `{"id":"r3","method":"notification.show","params":{
   "title":"...","body":"..."}}`
 
@@ -725,17 +736,22 @@ impl Rpc for SocketRpc {
         let reply = self.call("pane.get", json!({"pane_id": pane_id}))?;
         Ok(parse_pane_status(&reply))
     }
+    // NOTE (corrected 2026-07-26): the marker is a `tokens` entry, and an
+    // `error` reply must not be swallowed — see the correction note above and
+    // `reply_error` in src/herdr/rpc.rs.
     fn set_marker(&mut self, pane_id: &str) -> Result<(), HerdrError> {
-        self.call("pane.report_metadata", json!({
-            "pane_id": pane_id, "source": METADATA_SOURCE, "custom_status": MARKER
+        let reply = self.call("pane.report_metadata", json!({
+            "pane_id": pane_id, "source": METADATA_SOURCE,
+            "tokens": { MARKER_TOKEN: MARKER }
         }))?;
-        Ok(())
+        reply_error(&reply)
     }
     fn clear_marker(&mut self, pane_id: &str) -> Result<(), HerdrError> {
-        self.call("pane.report_metadata", json!({
-            "pane_id": pane_id, "source": METADATA_SOURCE, "clear_custom_status": true
+        let reply = self.call("pane.report_metadata", json!({
+            "pane_id": pane_id, "source": METADATA_SOURCE,
+            "tokens": { MARKER_TOKEN: Value::Null }
         }))?;
-        Ok(())
+        reply_error(&reply)
     }
     fn notify(&mut self, title: &str, body: &str) -> Result<(), HerdrError> {
         self.call("notification.show", json!({"title": title, "body": body}))?;

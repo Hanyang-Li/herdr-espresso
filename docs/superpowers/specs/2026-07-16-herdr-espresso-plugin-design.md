@@ -65,11 +65,24 @@ plugin drives it; it does not vendor or link espresso's source.
     acknowledges; later lines are pushed events. Pane event types include
     `pane.created`, `pane.closed`, `pane.focused`, `pane.agent_status_changed`.
   - `pane.get` / `pane.list` / `agent.get` — read current agent status.
-  - `pane.report_metadata` — `{ pane_id, source, custom_status, ttl_ms?,
-    clear_custom_status? }`. `custom_status` is capped at 32 chars (`󰅶` fits).
-    Omit `ttl_ms` so the marker persists until cleared or the pane closes.
-    herdr removes a source's metadata automatically when the pane closes.
-    `source` must be ASCII `[A-Za-z0-9:._-]`, ≤80 chars — use `espresso`.
+  - `pane.report_metadata` — `{ pane_id, source, tokens, ttl_ms? }`. A sidebar
+    marker is a **token**: set it with `tokens: { espresso: "espresso" }` and
+    clear it with a null value, `tokens: { espresso: null }` (which leaves other
+    sources' tokens on the pane alone). Token names must match
+    `^[A-Za-z0-9_-]{1,32}$`. Omit `ttl_ms` so the marker persists until cleared
+    or the pane closes. herdr removes a source's metadata automatically when the
+    pane closes. `source` must be ASCII `[A-Za-z0-9:._-]`, ≤80 chars — use
+    `espresso`. Rendering additionally requires the **user's** config to name the
+    token in a sidebar row template as `$espresso` (`ui.sidebar.agents.rows`);
+    no plugin-side change alone can make the marker appear.
+
+    > **Correction (2026-07-26).** This section originally specified
+    > `custom_status` / `clear_custom_status`. herdr has no such fields, so every
+    > call was rejected with `invalid_metadata_request: missing metadata field to
+    > set or clear` and the marker never once rendered — a bug that survived to
+    > release because the field names were written from assumption here and never
+    > checked against a live server. Confirm herdr param names against
+    > `herdr api schema --json` before writing them into a plan.
   - `notification.show` — `{ title, body?, sound? }` for the helper warning.
 - Keybindings live in the **user's herdr config**, not the plugin manifest.
   Modifier tokens: `ctrl`/`control`, `shift`, `alt`/`option`/`meta` (→ Alt),
@@ -124,7 +137,7 @@ Single binary `herdr-espresso` with clap subcommands:
 ### watch flow (core)
 1. Connect to `$HERDR_SOCKET_PATH`.
 2. Set the marker: `pane.report_metadata { pane_id, source:"espresso",
-   custom_status:"󰅶" }` (no ttl).
+   tokens:{ espresso:"espresso" } }` (no ttl).
 3. `events.subscribe` for `pane.agent_status_changed` and `pane.closed` on this
    pane; then `pane.get` once to seed the initial status.
 4. Event loop — a single-threaded loop that unifies events and timers. Each
@@ -144,7 +157,7 @@ Single binary `herdr-espresso` with clap subcommands:
    - Socket EOF (server gone, e.g. `herdr server stop`) → kill espresso, exit
      (marker is moot).
 5. `SIGTERM` handler (toggle-off) → kill espresso, clear the marker via
-   `pane.report_metadata { pane_id, source:"espresso", clear_custom_status:true
+   `pane.report_metadata { pane_id, source:"espresso", tokens:{ espresso:null }
    }`, remove the pidfile, exit 0.
 6. On startup, run `espresso daemon status`; if the helper is not installed,
    `notification.show` a one-time warning, then continue.
