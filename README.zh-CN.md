@@ -25,7 +25,8 @@ pane 里的编码 agent 正在工作时让 macOS 保持唤醒，agent 空闲后�
 - **跟随 agent 状态。** 无需手动开关，监控随 agent 状态自动生效。
 - **仅 agent pane。** 对纯 shell 开启监控会被拒绝并弹通知（shell 没有工作/空闲状态可
   跟踪）。
-- **侧边栏标记。** 被监控的 pane 旁会显示 `espresso` 标记，停止监控后消失。
+- **侧边栏标记。** 被监控的 pane 旁可以显示 `espresso` 标记、停止监控后消失——只需在
+  herdr 配置里加一行（见[侧边栏标记](#侧边栏标记)）。
 - **自愈租约。** `espresso` 以短租约方式持有、agent 工作期间不断续租，因此崩溃的
   watcher 绝不会一直占着 Mac 不睡——租约会在 ~90 秒内自动到期。
 - **事件驱动。** watcher 空闲时阻塞在内核里、几乎 0% CPU；toggle 关闭是瞬时的。
@@ -67,8 +68,36 @@ command = "espresso.toggle"
 description = "espresso: toggle monitor on focused pane"
 ```
 
-焦点在一个 **agent** pane 上时按下它，即可对该 pane 开/关监控。监控期间该 pane 侧边栏
-会显示 `espresso` 标记。对没有 agent 的 pane 按下会被拒绝并弹通知。
+焦点在一个 **agent** pane 上时按下它，即可对该 pane 开/关监控。对没有 agent 的 pane
+按下会被拒绝并弹通知。
+
+## 侧边栏标记
+
+pane 处于监控中时，插件会上报一个名为 `espresso` 的 **pane metadata token**。herdr 只在
+侧边栏行模板按名字引用某个 token 时才渲染它，所以要把 `$espresso` 加进展开的 agent 行：
+
+```toml
+[ui.sidebar.agents]
+rows = [["state_icon", "workspace", "tab"], ["agent", "$espresso"]]
+```
+
+自定义 token 必须带 `$` 前缀，否则 herdr 会拒绝整行配置。也可以给它加样式
+（herdr 0.7.5+）：
+
+```toml
+rows = [["state_icon", "workspace", "tab"], ["agent", { token = "$espresso", dim = true }]]
+```
+
+两点需要注意：
+
+- `rows_by_agent` 里的条目会**整体替换**该 agent 的 `rows`，所以如果你按 agent 覆盖了
+  行布局，也要在那里加上这个 token：
+  ```toml
+  [ui.sidebar.agents.rows_by_agent]
+  claude = [["state_icon", "workspace", "tab"], ["terminal_title_stripped"], ["agent", "$espresso"]]
+  ```
+- 不加这段配置监控功能完全不受影响，只是侧边栏看不到东西。行模板写错时，
+  `herdr server reload-config` 会在 `diagnostics` 里报出来。
 
 ## 工作原理
 
@@ -77,7 +106,7 @@ description = "espresso: toggle monitor on focused pane"
 - **idle/done → 宽限后释放。** agent 停止活跃后，watcher 等约 5 秒（避免瞬时闪回
   working 反复起停）再释放 `espresso`，监控本身继续。
 - **agent 退出 / pane 关闭 → 停止。** 若 pane 关闭，或 agent 退出、pane 变回纯 shell，
-  watcher 会自行停止：释放 `espresso` 并移除标记。
+  watcher 会自行停止：释放 `espresso` 并清除标记 token。
 - **自愈租约。** 因为租约短且靠续租维持，watcher 若意外死亡（崩溃、`kill -9`）也无法
   一直占着 Mac 不睡——其 `espresso` 租约会在 ~90 秒内到期。
 - **detach 安全。** watcher 以独立 session 脱离运行，detach 掉 herdr 客户端不会停止

@@ -67,7 +67,9 @@ pub fn run_loop<R: Rpc, W: Waiter, C: EspressoCtl>(
     // gone). Closing espresso here is immediate and never waits on the
     // stop-grace, so toggle-off reacts at once.
     esp.kill();
-    let _ = rpc.clear_marker(pane_id);
+    if let Err(e) = rpc.clear_marker(pane_id) {
+        eprintln!("herdr-espresso: clear_marker failed: {e:?}");
+    }
     state::remove_pidfile(pane_id);
 }
 
@@ -130,7 +132,11 @@ pub fn watch(pane_id: &str) -> i32 {
     let mut esp = crate::espresso::Lease::default();
 
     // Marker on; one-time helper warning if lid-closed isn't installed.
-    let _ = rpc.set_marker(pane_id);
+    // A rejected marker is logged, not swallowed: monitoring still works, but
+    // the sidebar would silently show nothing.
+    if let Err(e) = rpc.set_marker(pane_id) {
+        eprintln!("herdr-espresso: set_marker failed: {e:?}");
+    }
     if !crate::espresso::daemon_installed() {
         let _ = rpc.notify(
             &format!("{PLUGIN_ID}: lid-closed not active"),
