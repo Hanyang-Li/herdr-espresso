@@ -30,11 +30,15 @@ in one public place — herdr's tab bar — instead of per-pane sidebar markers.
   live handoff to a new server. Not on client attach, config reload, or
   plugin link/enable. It is a one-shot command, not a supervised daemon.
   Startup and action commands get `HERDR_PLUGIN_STATE_DIR`, `HERDR_SOCKET_PATH`.
-- `events.subscribe` — `pane.agent_status_changed` requires a `pane_id`, but
-  `pane.updated`, `pane.created`, `pane.closed`, `pane.exited` and
-  `pane.agent_detected` accept no filter and cover every pane. New
-  subscriptions do **not** replay history: subscribe first, then snapshot. A
-  subscriber that falls behind gets an `events_lost` error line.
+- `events.subscribe` — `pane.agent_status_changed` requires a `pane_id`, and
+  it is the **only** event emitted when an agent's status changes
+  (`pane.updated` fires only when the agent *name* changes). `pane.created`,
+  `pane.closed`, `pane.exited` and `pane.agent_detected` accept no filter.
+  One request may carry many subscriptions; if any referenced pane does not
+  exist the whole request is rejected and the connection closed. The first
+  line back is the ack. New subscriptions do **not** replay history:
+  subscribe first, then snapshot. A subscriber that falls behind gets an
+  `events_lost` error line and its connection is closed.
 - `pane.list` with `{}` returns `{"result":{"panes":[PaneInfo...]}}`; each
   `PaneInfo` has `agent` (absent for shells) and `agent_status`
   (`idle|working|blocked|done|unknown`).
@@ -52,7 +56,7 @@ in one public place — herdr's tab bar — instead of per-pane sidebar markers.
 ```toml
 id = "espresso"
 version = "0.2.0"
-min_herdr_version = "0.9.0"
+min_herdr_version = "0.8.2"   # tab_bar_right (0.8.2); [[startup]] exists since 0.7.5
 
 [[startup]]
 command = ["bash", "bin/startup"]
@@ -94,13 +98,29 @@ The `status` action and `bin/status` are removed.
 
 ### Watcher loop
 
-1. Subscribe (unfiltered pane lifecycle events above), then snapshot with
-   `pane.list`, compute `any_active`, feed `Machine::on_status`.
-2. Block in `PollWaiter`. Every wake that reports events → one `pane.list`
-   (the drain already coalesces a burst into one wake) → `on_status`.
-   Timer wakes → `on_timer` (renew / stop-grace), unchanged.
-3. After each step, derive the display state — `awake` when the machine holds
-   espresso, else `idle` — and rewrite `statusline` only when it changed.
+The event stream must cover every pane's status, so the subscription is
+rebuilt whenever the set of panes changes:
+
+- subscription = unfiltered `pane.created`, `pane.closed`, `pane.exited`,
+  `pane.agent_detected` + one `pane.agent_status_changed` entry per pane id
+  (all panes, shells included, so an agent started in a shell is seen).
+
+**Sync** (startup, and every wake that reports events):
+
+1. `pane.list` → snapshot `{any_active, pane_ids}`.
+2. If `pane_ids` equals the subscribed set → apply `any_active`, done.
+3. Otherwise open a new subscription for `pane_ids` (the old stream is
+   replaced only when the new one is acknowledged), then go back to 1 — the
+   snapshot that counts is the one taken after the subscription is live.
+   A rejected subscription (a pane closed in between) also goes back to 1.
+   At most 3 rounds per sync; if no stream was ever established, the watcher
+   exits.
+
+Status is fed to the existing `Machine::on_status`; timer wakes go to
+`on_timer` (renew / stop-grace), unchanged. After each step the display
+state is derived — `awake` while espresso is actually held
+(`EspressoCtl::is_up`), else `idle` — and `statusline` is rewritten only when
+it changed.
 
 `any_active` = some pane has a non-empty `agent` and `agent_status` is
 `working` or `blocked`.
@@ -108,15 +128,17 @@ The `status` action and `bin/status` are removed.
 ### Exit paths and cleanup
 
 - SIGTERM (toggle-off or startup replacement) → exit.
-- Event stream EOF → try once to reconnect and resubscribe; on success
-  re-snapshot and continue; if the socket cannot be reached, the server is
-  gone → exit (keeping `enabled` so startup restores it).
+- Event stream EOF (server gone, or `events_lost` closed the stream) → drop
+  the stream and sync again, which resubscribes; if the socket cannot be
+  reached the server is gone → exit (keeping `enabled` so startup restores
+  it). Two EOFs less than 5 s apart → exit, so a server that keeps closing
+  the stream cannot spin the loop.
 - Every exit runs the same cleanup: kill espresso, remove `statusline`,
   remove `watcher.pid`.
 
 ### Error handling
 
-- `events_lost` and any other pushed bytes just trigger a re-snapshot.
+- Pushed event bytes are never parsed; any of them just triggers a sync.
 - `pane.list` transport error (socket unreachable) → treat as server gone →
   exit. Error reply → log, keep the previous state.
 - espresso missing → toast once, retry every 10 s (existing). Spawn failure →
@@ -146,13 +168,13 @@ fails → the entry hides.
 
 ## Code changes
 
-- `herdr/rpc.rs`: replace `pane_state`/`PaneState` with `any_active()` backed
-  by `pane.list` and a pure `parse_any_active(reply) -> Result<bool, _>`;
+- `herdr/rpc.rs`: replace `pane_state`/`PaneState` with `snapshot()` backed
+  by `pane.list` and a pure `parse_snapshot(reply) -> Result<Snapshot, _>`;
   drop `set_marker`/`clear_marker`.
-- `herdr/events.rs`: unfiltered subscription; `SocketEvents::subscribe(path)`.
+- `herdr/events.rs`: `SocketEvents::subscribe(path, pane_ids)` (lifecycle +
+  per-pane status, ack checked); `Waiter::subscribe(pane_ids)` swaps streams.
 - `watcher.rs`: drop `pane_id`; add a `StatusSink` trait (write/clear
-  statusline) and a resubscribe hook on the `Waiter` so the loop is fully
-  testable with fakes.
+  statusline); the sync logic above, fully testable with fakes.
 - `toggle.rs`: global toggle; new `startup.rs`.
 - `state.rs`: fixed file names, atomic write, legacy pidfile sweep; drop
   `sanitize_pane_id`, `list_monitored`.
@@ -163,14 +185,15 @@ fails → the entry hides.
 
 ## Testing
 
-- Unit: `parse_any_active` (no panes, shells only, idle agent, working,
-  blocked, error reply); state (enabled flag, atomic statusline, pidfile
+- Unit: `parse_snapshot` (no panes, shells only, idle agent, working,
+  blocked, error reply, sorted pane ids); state (enabled flag, atomic statusline, pidfile
   reserve/race, legacy sweep); display state derivation.
 - `tests/watcher_loop.rs` with fake Rpc/Waiter/StatusSink/Espresso: seeded
   active → awake immediately; all idle → release after grace; reactivate in
-  grace cancels; list error keeps state; EOF + reconnect continues; EOF +
-  reconnect failure cleans up; Stop cleans up and clears statusline.
-- `tests/rpc_wire.rs`: `pane.list` request shape; unfiltered subscribe shape.
+  grace cancels; list error keeps state; pane set change resubscribes and
+  re-snapshots; rejected subscription retries; EOF resubscribes; EOF with
+  herdr unreachable cleans up; Stop cleans up and clears statusline.
+- `tests/rpc_wire.rs`: `pane.list` request shape; subscribe request shape and ack handling.
 - Manual (herdr 0.9.3): toggle shows/hides the entry; two agents alternate →
   stays awake, all stop → idle; `pmset -g assertions` shows espresso's hold;
   restarting the herdr server restores the switch.
