@@ -1,3 +1,4 @@
+use crate::consts::LOCK_WAIT;
 use crate::control::{self, Spawn};
 use crate::store::StateDir;
 
@@ -5,13 +6,20 @@ use crate::store::StateDir;
 /// including after a live handoff. Restores the switch from `enabled`.
 pub fn startup() -> i32 {
     let dir = StateDir::from_env();
+    let lock = match dir.lock(LOCK_WAIT) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("herdr-espresso: another toggle/startup is still running ({e})");
+            return 1;
+        }
+    };
     control::sweep_legacy(&dir);
 
     // Replace rather than reuse a live watcher: after a live handoff the
     // outgoing one can still look alive, then exit on its dropped stream and
     // leave none running.
     if let Some(pid) = control::live_watcher(&dir) {
-        control::stop_watcher(&dir, pid);
+        control::stop_watcher(&lock, &dir, pid);
     }
 
     if !dir.enabled() {
@@ -20,8 +28,8 @@ pub fn startup() -> i32 {
         dir.remove_pid();
         return 0;
     }
-    match control::spawn_watcher(&dir) {
-        Spawn::Started(_) | Spawn::AlreadyRunning => 0,
+    match control::spawn_watcher(&lock, &dir) {
+        Spawn::Started(_) => 0,
         Spawn::Failed => {
             dir.remove_statusline();
             eprintln!(

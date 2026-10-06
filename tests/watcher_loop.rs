@@ -96,12 +96,16 @@ impl Waiter for FakeWaiter {
 
 #[derive(Default)]
 struct FakeEsp {
+    log: Option<std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>>,
     up: bool,
     rotates: u32,
     kills: u32,
 }
 impl EspressoCtl for FakeEsp {
     fn rotate(&mut self) -> Result<(), EspressoError> {
+        if let Some(log) = &self.log {
+            log.borrow_mut().push("rotate");
+        }
         self.up = true;
         self.rotates += 1;
         Ok(())
@@ -158,10 +162,21 @@ fn run(
     waiter: &mut FakeWaiter,
     clock: impl FnMut() -> Instant,
 ) -> (FakeEsp, FakeSink) {
+    let (esp, sink, _) = run_ready(rpc, waiter, clock);
+    (esp, sink)
+}
+
+/// Like `run`, also returning how many times `on_ready` fired.
+fn run_ready(
+    rpc: &mut FakeRpc,
+    waiter: &mut FakeWaiter,
+    clock: impl FnMut() -> Instant,
+) -> (FakeEsp, FakeSink, u32) {
     let mut esp = FakeEsp::default();
     let mut sink = FakeSink::default();
-    run_loop(rpc, waiter, &mut esp, &mut sink, clock);
-    (esp, sink)
+    let mut ready = 0;
+    run_loop(rpc, waiter, &mut esp, &mut sink, clock, || ready += 1);
+    (esp, sink, ready)
 }
 
 #[test]
@@ -171,7 +186,8 @@ fn seeded_active_holds_and_shows_awake_until_stop() {
     let mut rpc = FakeRpc::new(vec![List::Panes(true, A), List::Panes(true, A)]);
     let mut waiter = FakeWaiter::new(vec![Wake::Stop], vec![]);
     let t0 = Instant::now();
-    let (esp, sink) = run(&mut rpc, &mut waiter, move || t0);
+    let (esp, sink, ready) = run_ready(&mut rpc, &mut waiter, move || t0);
+    assert_eq!(ready, 1);
     assert_eq!(waiter.attempts, vec![ids(A)]);
     assert_eq!(rpc.i, 2);
     assert_eq!(esp.rotates, 1);
@@ -297,7 +313,8 @@ fn never_subscribed_exits_without_waiting() {
         vec![Sub::Rejected, Sub::Rejected, Sub::Rejected],
     );
     let t0 = Instant::now();
-    let (esp, sink) = run(&mut rpc, &mut waiter, move || t0);
+    let (esp, sink, ready) = run_ready(&mut rpc, &mut waiter, move || t0);
+    assert_eq!(ready, 0);
     assert_eq!(waiter.waited, 0);
     assert_eq!(esp.rotates, 0);
     assert!(sink.shown.is_empty());
@@ -338,4 +355,40 @@ fn rapid_eofs_exit_instead_of_spinning() {
     assert_eq!(waiter.attempts.len(), 2); // initial + one resubscribe
     assert_eq!(waiter.waited, 2);
     assert!(sink.cleared);
+}
+
+#[test]
+fn first_unreachable_list_never_reports_ready() {
+    let mut rpc = FakeRpc::new(vec![List::Unreachable]);
+    let mut waiter = FakeWaiter::new(vec![Wake::Stop], vec![]);
+    let t0 = Instant::now();
+    let (_esp, sink, ready) = run_ready(&mut rpc, &mut waiter, move || t0);
+    assert_eq!(ready, 0);
+    assert_eq!(waiter.waited, 0);
+    assert!(sink.cleared);
+}
+
+#[test]
+fn ready_fires_once_and_before_the_first_lease() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut rpc = FakeRpc::new(vec![List::Panes(true, A); 4]);
+    let mut waiter = FakeWaiter::new(vec![Wake::Eof, Wake::Stop], vec![]);
+    let mut esp = FakeEsp {
+        log: Some(Rc::clone(&log)),
+        ..Default::default()
+    };
+    let mut sink = FakeSink::default();
+    let t0 = Instant::now();
+    let l2 = Rc::clone(&log);
+    run_loop(
+        &mut rpc,
+        &mut waiter,
+        &mut esp,
+        &mut sink,
+        move || t0,
+        || l2.borrow_mut().push("ready"),
+    );
+    assert_eq!(*log.borrow(), vec!["ready", "rotate"]);
 }

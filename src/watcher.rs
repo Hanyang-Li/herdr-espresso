@@ -47,6 +47,7 @@ pub fn run_loop<R: Rpc, W: Waiter, C: EspressoCtl, S: StatusSink>(
     esp: &mut C,
     sink: &mut S,
     mut now: impl FnMut() -> Instant,
+    on_ready: impl FnOnce(),
 ) {
     let mut machine = Machine::new();
     let mut warned_missing = false;
@@ -54,7 +55,14 @@ pub fn run_loop<R: Rpc, W: Waiter, C: EspressoCtl, S: StatusSink>(
     let mut subscribed: Option<Vec<String>> = None;
     let mut last_eof: Option<Instant> = None;
 
-    let mut running = match sync(rpc, waiter, &mut subscribed) {
+    let first = sync(rpc, waiter, &mut subscribed);
+    // Subscribed (or at least reached herdr): tell the controller we are up,
+    // before taking any espresso lease or showing status, so a watcher that
+    // never gets here is killed without leaving anything behind.
+    if !matches!(first, Synced::Stop) {
+        on_ready();
+    }
+    let mut running = match first {
         Synced::Active(active) => {
             let n = now();
             let acts = machine.on_status(active, n);
@@ -236,6 +244,18 @@ fn run_watcher(dir: &StateDir) -> i32 {
     let mut esp = crate::espresso::Lease::default();
     let mut sink = FileStatus(dir.clone());
 
-    run_loop(&mut rpc, &mut waiter, &mut esp, &mut sink, Instant::now);
+    let own = std::process::id() as i32;
+    run_loop(
+        &mut rpc,
+        &mut waiter,
+        &mut esp,
+        &mut sink,
+        Instant::now,
+        || {
+            if let Err(e) = dir.write_pid(own) {
+                eprintln!("herdr-espresso: cannot write pidfile: {e}");
+            }
+        },
+    );
     0
 }

@@ -75,7 +75,8 @@ The `status` action and `bin/status` are removed.
 | File | Meaning |
 |---|---|
 | `enabled` | Persistent switch intent; read by startup. |
-| `watcher.pid` | The single global watcher's pid. |
+| `watcher.pid` | The single global watcher's pid. Written by the watcher itself once it has subscribed (its readiness signal), via temp file + rename. |
+| `watcher.lock` | Empty; held with `flock` by `toggle`/`startup` for a whole stop-or-spawn, so two of them never interleave. |
 | `statusline` | The exact text the tab bar shows; exists only while a watcher runs. |
 | `watcher.log` | Watcher stdout/stderr, truncated on each watcher start. |
 
@@ -84,9 +85,13 @@ The `status` action and `bin/status` are removed.
 - `toggle` — decides by **watcher liveness**, not by `enabled`:
   - watcher alive → off: remove `enabled`, SIGTERM the watcher, toast
     `espresso off`.
-  - watcher not alive → on: write `enabled`, atomically reserve `watcher.pid`,
-    spawn the detached watcher (setsid, stdio to `watcher.log`), toast
-    `espresso on`; warn once if the lid-closed helper is not installed.
+  - watcher not alive → on: write `enabled`, spawn the detached watcher
+    (setsid, stdio to `watcher.log`) and wait up to 10 s for it to write its
+    own `watcher.pid`; if it exits first or times out, it is killed, `enabled`
+    is cleared and the toggle fails. Toast `espresso on`; warn once if the lid-closed helper is not installed.
+  - The whole operation runs under `watcher.lock` (bounded wait, 15 s, then
+    fail without touching state); toasts happen after the lock is released.
+    A double press therefore runs as on, then off.
   - A crashed watcher shows an empty tab bar entry, i.e. "off"; one press
     turns it on again.
 - `startup` — stop any live watcher (SIGTERM, wait for exit, bounded), then:
@@ -186,8 +191,7 @@ fails → the entry hides.
 ## Testing
 
 - Unit: `parse_snapshot` (no panes, shells only, idle agent, working,
-  blocked, error reply, sorted pane ids); state (enabled flag, atomic statusline, pidfile
-  reserve/race, legacy sweep); display state derivation.
+  blocked, error reply, sorted pane ids); state (enabled flag, atomic statusline, control lock, atomic pidfile, legacy sweep); display state derivation.
 - `tests/watcher_loop.rs` with fake Rpc/Waiter/StatusSink/Espresso: seeded
   active → awake immediately; all idle → release after grace; reactivate in
   grace cancels; list error keeps state; pane set change resubscribes and

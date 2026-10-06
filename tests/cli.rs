@@ -52,4 +52,5 @@ fn startup_while_on_without_herdr_fails_and_keeps_the_switch() {
     assert!(!out.status.success());
     assert!(dir.join("enabled").exists());
     assert!(!dir.join("statusline").exists());
+    assert!(!dir.join("watcher.pid").exists());
 }

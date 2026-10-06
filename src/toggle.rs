@@ -1,4 +1,4 @@
-use crate::consts::PLUGIN_ID;
+use crate::consts::{LOCK_WAIT, PLUGIN_ID};
 use crate::control::{self, Spawn};
 use crate::herdr::{self, Rpc, SocketRpc};
 use crate::store::StateDir;
@@ -8,13 +8,23 @@ use crate::store::StateDir;
 /// the tab bar empty (looks off), and one press must turn it back on.
 pub fn toggle() -> i32 {
     let dir = StateDir::from_env();
+    // Held for the whole stop-or-spawn, so a second press (or startup) waits
+    // instead of racing; released before any toast, which can be slow.
+    let lock = match dir.lock(LOCK_WAIT) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("herdr-espresso: another toggle/startup is still running ({e})");
+            return 1;
+        }
+    };
     control::sweep_legacy(&dir);
 
     if let Some(pid) = control::live_watcher(&dir) {
         if let Err(e) = dir.set_enabled(false) {
             eprintln!("herdr-espresso: clear enabled failed: {e}");
         }
-        control::stop_watcher(&dir, pid);
+        control::stop_watcher(&lock, &dir, pid);
+        drop(lock);
         notify("espresso off", "No longer keeping the Mac awake.");
         println!("espresso: off");
         return 0;
@@ -24,8 +34,9 @@ pub fn toggle() -> i32 {
         eprintln!("herdr-espresso: set enabled failed: {e}");
         return 1;
     }
-    match control::spawn_watcher(&dir) {
+    match control::spawn_watcher(&lock, &dir) {
         Spawn::Started(_) => {
+            drop(lock);
             notify(
                 "espresso on",
                 "Keeping the Mac awake while any agent works.",
@@ -39,12 +50,9 @@ pub fn toggle() -> i32 {
             println!("espresso: on");
             0
         }
-        Spawn::AlreadyRunning => {
-            println!("espresso: already on");
-            0
-        }
         Spawn::Failed => {
             let _ = dir.set_enabled(false);
+            drop(lock);
             eprintln!(
                 "herdr-espresso: watcher failed to start, see {}",
                 dir.log_path().display()

@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::consts::STOP_WAIT;
-use crate::store::{pid_alive, read_pid_at, Reserve, StateDir};
+use crate::consts::{READY_POLL, READY_TIMEOUT, STOP_WAIT};
+use crate::store::{pid_alive, read_pid_at, ControlLock, StateDir};
 
 const EXE_NAME: &str = "herdr-espresso";
 
@@ -48,7 +48,7 @@ pub fn terminate(pid: i32, wait: Duration) -> bool {
         if !pid_alive(pid) {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(READY_POLL);
     }
     unsafe {
         libc::kill(pid, libc::SIGKILL);
@@ -56,7 +56,9 @@ pub fn terminate(pid: i32, wait: Duration) -> bool {
     false
 }
 
-pub fn stop_watcher(dir: &StateDir, pid: i32) {
+/// Stop the watcher `pid`. Needs the control lock, so it cannot interleave with
+/// another toggle/startup.
+pub fn stop_watcher(_lock: &ControlLock, dir: &StateDir, pid: i32) {
     if !terminate(pid, STOP_WAIT) {
         // Killed hard, so its own cleanup never ran. Its espresso lease still
         // expires on its own within LEASE.
@@ -68,23 +70,17 @@ pub fn stop_watcher(dir: &StateDir, pid: i32) {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Spawn {
     Started(i32),
-    AlreadyRunning,
     Failed,
 }
 
-/// Start the detached global watcher, unless one is already running.
-pub fn spawn_watcher(dir: &StateDir) -> Spawn {
-    match dir.try_reserve_pid(is_ours) {
-        Reserve::Reserved => {}
-        Reserve::Busy => return Spawn::AlreadyRunning,
-        Reserve::Failed => return Spawn::Failed,
-    }
-    let failed = || {
-        dir.remove_pid();
-        Spawn::Failed
-    };
+/// Start the detached global watcher and wait until it reports ready by
+/// writing its own pidfile (after it has subscribed to herdr). The caller holds
+/// the control lock and has already dealt with any live watcher.
+pub fn spawn_watcher(_lock: &ControlLock, dir: &StateDir) -> Spawn {
+    // A stale pidfile must not be mistaken for the new watcher's readiness.
+    dir.remove_pid();
     let Ok(exe) = std::env::current_exe() else {
-        return failed();
+        return Spawn::Failed;
     };
 
     // Default both streams to null: a detached watcher must NEVER inherit the
@@ -113,20 +109,36 @@ pub fn spawn_watcher(dir: &StateDir) -> Spawn {
         });
     }
     let Ok(mut child) = cmd.spawn() else {
-        return failed();
+        return Spawn::Failed;
     };
-    // A watcher that cannot reach herdr exits at once; catch that here rather
-    // than report "on" with nothing running. try_wait (not a liveness probe):
-    // our exited child stays a zombie until reaped, and kill(0) succeeds on it.
-    std::thread::sleep(Duration::from_millis(100));
-    if !matches!(child.try_wait(), Ok(None)) {
-        return failed();
-    }
     let pid = child.id() as i32;
-    if dir.write_pid(pid).is_err() {
-        return failed();
+    // A watcher that cannot reach herdr exits at once; one that can writes its
+    // pidfile once subscribed. try_wait (not a liveness probe): our exited
+    // child stays a zombie until reaped, and kill(0) succeeds on it.
+    let deadline = Instant::now() + READY_TIMEOUT;
+    loop {
+        if !matches!(child.try_wait(), Ok(None)) {
+            return Spawn::Failed;
+        }
+        if dir.read_pid() == Some(pid) {
+            return Spawn::Started(pid);
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(READY_POLL);
     }
-    Spawn::Started(pid)
+    // It may have become ready in the gap since the last poll.
+    if dir.read_pid() == Some(pid) {
+        return Spawn::Started(pid);
+    }
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+    let _ = child.wait();
+    dir.remove_pid_if(pid);
+    dir.remove_statusline();
+    Spawn::Failed
 }
 
 /// Stop 0.1.x per-pane watchers and drop their files. On SIGTERM they clear
@@ -180,6 +192,27 @@ mod tests {
         pid
     }
 
+    /// Like `spawn_reaped`, but returns only once the script printed a line, so
+    /// anything it set up (a signal trap) is in place.
+    fn spawn_reaped_ready(script: &str) -> i32 {
+        use std::io::{BufRead, BufReader};
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        pid
+    }
+
     #[test]
     fn terminate_stops_a_cooperative_process() {
         let pid = spawn_reaped("exec sleep 60");
@@ -191,8 +224,7 @@ mod tests {
     #[test]
     fn terminate_kills_a_process_that_ignores_sigterm() {
         // An ignored disposition survives exec, so `sleep` ignores SIGTERM.
-        let pid = spawn_reaped("trap '' TERM; exec sleep 60");
-        std::thread::sleep(Duration::from_millis(100)); // let the trap install
+        let pid = spawn_reaped_ready("trap '' TERM; echo ready; exec sleep 60");
         assert!(!terminate(pid, Duration::from_millis(200)));
         std::thread::sleep(Duration::from_millis(100));
         assert!(!pid_alive(pid));

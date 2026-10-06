@@ -24,3 +24,12 @@ pub const SYNC_ROUNDS: usize = 3;
 // How long toggle-off / startup wait for a watcher to exit on SIGTERM before
 // SIGKILLing it.
 pub const STOP_WAIT: Duration = Duration::from_secs(3);
+
+// How long a freshly spawned watcher gets to subscribe and write its pidfile
+// (>= SYNC_ROUNDS * SUBSCRIBE_ACK_TIMEOUT + slack) before it is given up on.
+pub const READY_TIMEOUT: Duration = Duration::from_secs(10);
+pub const READY_POLL: Duration = Duration::from_millis(25);
+// How long toggle/startup wait for the control lock: the longest holder is
+// startup stopping a watcher and then waiting for the new one to be ready.
+pub const LOCK_WAIT: Duration =
+    Duration::from_secs(STOP_WAIT.as_secs() + READY_TIMEOUT.as_secs() + 2);
