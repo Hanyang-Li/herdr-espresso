@@ -1,10 +1,10 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use super::rpc::{request_line, HerdrError};
-use serde_json::json;
+use super::rpc::{reply_error, request_line, HerdrError};
+use serde_json::{json, Value};
 
 /// What woke a `Waiter`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,30 +27,64 @@ pub trait Waiter {
     /// Wait until an event / stop / EOF, or until `timeout` elapses. `None`
     /// blocks indefinitely (until event/stop/eof).
     fn wait(&mut self, timeout: Option<Duration>) -> Wake;
+
+    /// Replace the event stream with one covering `pane_ids`. The old stream
+    /// is dropped only once the new one is acknowledged. `HerdrError::Io`:
+    /// herdr is unreachable; `HerdrError::Protocol`: herdr rejected it (e.g.
+    /// a listed pane closed in the meantime).
+    fn subscribe(&mut self, pane_ids: &[String]) -> Result<(), HerdrError>;
 }
 
-/// A subscribed event stream for one pane (one long-lived connection).
+/// Unfiltered pane lifecycle kinds. They announce changes to the set of panes,
+/// which is what tells the watcher to rebuild the per-pane status entries.
+pub const LIFECYCLE_EVENTS: &[&str] = &[
+    "pane.created",
+    "pane.closed",
+    "pane.exited",
+    "pane.agent_detected",
+];
+
+/// `pane.agent_status_changed` is the only event herdr emits when an agent's
+/// status changes, and it must name a pane — so every pane gets its own entry.
+pub fn subscribe_request(pane_ids: &[String]) -> String {
+    let mut subs: Vec<Value> = LIFECYCLE_EVENTS
+        .iter()
+        .map(|t| json!({ "type": t }))
+        .collect();
+    subs.extend(
+        pane_ids
+            .iter()
+            .map(|id| json!({ "type": "pane.agent_status_changed", "pane_id": id })),
+    );
+    request_line("s1", "events.subscribe", json!({ "subscriptions": subs }))
+}
+
+/// A subscribed event stream (one long-lived connection).
 pub struct SocketEvents {
     stream: UnixStream,
 }
 
 impl SocketEvents {
-    pub fn subscribe(path: &str, pane_id: &str) -> Result<Self, HerdrError> {
+    pub fn subscribe(path: &str, pane_ids: &[String]) -> Result<Self, HerdrError> {
         let mut stream = UnixStream::connect(path)?;
-        let sub = request_line(
-            "s1",
-            "events.subscribe",
-            json!({"subscriptions":[
-                {"type":"pane.agent_status_changed","pane_id": pane_id},
-                {"type":"pane.closed","pane_id": pane_id}
-            ]}),
-        );
-        stream.write_all(sub.as_bytes())?;
+        stream.write_all(subscribe_request(pane_ids).as_bytes())?;
         stream.flush()?;
+        // Read the ack before going non-blocking: a rejected request must fail
+        // here rather than look like a healthy stream that never speaks. Bytes
+        // the BufReader reads past the ack are events we drop — harmless, the
+        // caller snapshots right after subscribing.
+        let mut reader = BufReader::new(&stream);
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Err(HerdrError::Protocol(
+                "subscription closed before ack".into(),
+            ));
+        }
+        let ack: Value =
+            serde_json::from_str(&line).map_err(|e| HerdrError::Protocol(e.to_string()))?;
+        reply_error(&ack)?;
         // We never parse event payloads — any pushed bytes just mean
-        // "re-snapshot" — so switch to non-blocking and let poll()+drain handle
-        // the ack and every subsequent event uniformly. Non-blocking also means
-        // subscription setup can never hang startup.
+        // "re-snapshot" — so from here on poll()+drain handle the stream.
         stream.set_nonblocking(true)?;
         Ok(Self { stream })
     }
@@ -74,18 +108,23 @@ impl SocketEvents {
     }
 }
 
-/// Real `Waiter`: `poll()`s the herdr event socket and a self-pipe fed by the
-/// SIGTERM handler. Woken only by an actual event, the stop signal, or the
-/// deadline — no busy loop, no periodic wakeups.
+/// Real `Waiter`: `poll()`s the herdr event socket (when subscribed) and a
+/// self-pipe fed by the SIGTERM handler. Woken only by an actual event, the
+/// stop signal, or the deadline — no busy loop, no periodic wakeups.
 pub struct PollWaiter {
-    events: SocketEvents,
+    path: String,
+    events: Option<SocketEvents>,
     /// Read end of the self-pipe; SIGTERM writes a byte to its write end.
     sig_read: UnixStream,
 }
 
 impl PollWaiter {
-    pub fn new(events: SocketEvents, sig_read: UnixStream) -> Self {
-        Self { events, sig_read }
+    pub fn new(path: &str, sig_read: UnixStream) -> Self {
+        Self {
+            path: path.to_string(),
+            events: None,
+            sig_read,
+        }
     }
 }
 
@@ -102,18 +141,18 @@ impl Waiter for PollWaiter {
             }
             None => -1,
         };
-        let mut fds = [
-            libc::pollfd {
-                fd: self.events.raw_fd(),
+        let mut fds = vec![libc::pollfd {
+            fd: self.sig_read.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        if let Some(events) = &self.events {
+            fds.push(libc::pollfd {
+                fd: events.raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
-            },
-            libc::pollfd {
-                fd: self.sig_read.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
-        ];
+            });
+        }
         let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
         if rc <= 0 {
             // rc == 0: timeout. rc < 0: EINTR/error — re-evaluate on the next
@@ -121,18 +160,27 @@ impl Waiter for PollWaiter {
             // being readable on the very next poll).
             return Wake::Timeout;
         }
+        let ready = libc::POLLIN | libc::POLLHUP | libc::POLLERR;
         // Stop takes priority over events.
-        if fds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+        if fds[0].revents & ready != 0 {
             return Wake::Stop;
         }
-        if fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
-            if self.events.drain() {
+        if fds.len() > 1 && fds[1].revents & ready != 0 {
+            let open = self.events.as_mut().is_some_and(|e| e.drain());
+            if open {
                 Wake::Event
             } else {
+                // Server gone, or it closed the stream (`events_lost`).
+                self.events = None;
                 Wake::Eof
             }
         } else {
             Wake::Timeout
         }
+    }
+
+    fn subscribe(&mut self, pane_ids: &[String]) -> Result<(), HerdrError> {
+        self.events = Some(SocketEvents::subscribe(&self.path, pane_ids)?);
+        Ok(())
     }
 }

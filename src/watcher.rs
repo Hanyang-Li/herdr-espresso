@@ -124,11 +124,10 @@ pub fn watch(pane_id: &str) -> i32 {
         Ok(r) => r,
         Err(_) => return 1,
     };
-    let events = match crate::herdr::SocketEvents::subscribe(&sock, pane_id) {
-        Ok(e) => e,
-        Err(_) => return 1,
-    };
-    let mut waiter = crate::herdr::PollWaiter::new(events, sig_read);
+    let mut waiter = crate::herdr::PollWaiter::new(&sock, sig_read);
+    if waiter.subscribe(&[pane_id.to_string()]).is_err() {
+        return 1;
+    }
     let mut esp = crate::espresso::Lease::default();
 
     // Marker on; one-time helper warning if lid-closed isn't installed.

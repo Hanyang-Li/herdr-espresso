@@ -17,3 +17,6 @@ pub const LEASE: Duration = Duration::from_secs(90);
 pub const RENEW_INTERVAL: Duration = Duration::from_secs(60);
 pub const STOP_GRACE: Duration = Duration::from_secs(5);
 pub const RENEW_RETRY: Duration = Duration::from_secs(10);
+
+// How long `events.subscribe` may take to acknowledge before we give up.
+pub const SUBSCRIBE_ACK_TIMEOUT: Duration = Duration::from_secs(2);

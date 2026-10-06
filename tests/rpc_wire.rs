@@ -5,7 +5,7 @@
 //! the resulting `invalid_metadata_request` error reply was discarded. Field
 //! names and error handling are now pinned against a stub of herdr's socket.
 
-use herdr_espresso::herdr::{Rpc, SocketRpc};
+use herdr_espresso::herdr::{Rpc, SocketEvents, SocketRpc};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::sync::mpsc;
@@ -122,5 +122,48 @@ fn snapshot_lists_all_panes() {
     assert_eq!(req["method"], "pane.list");
     // No workspace filter: the watcher needs every pane in the session.
     assert_eq!(req["params"], serde_json::json!({}));
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[test]
+fn subscribe_lists_lifecycle_and_every_pane() {
+    let ack = "{\"id\":\"s1\",\"result\":{\"type\":\"subscription_started\"}}\n".to_string();
+    let (sock, rx) = stub_server("sub", vec![ack]);
+    let ids = vec!["w1:p1".to_string(), "w2:p3".to_string()];
+    SocketEvents::subscribe(&sock, &ids).expect("ack -> Ok");
+
+    let req = request(&rx);
+    assert_eq!(req["method"], "events.subscribe");
+    let subs = req["params"]["subscriptions"].as_array().unwrap();
+    let types: Vec<&str> = subs.iter().map(|s| s["type"].as_str().unwrap()).collect();
+    assert_eq!(
+        types,
+        [
+            "pane.created",
+            "pane.closed",
+            "pane.exited",
+            "pane.agent_detected",
+            "pane.agent_status_changed",
+            "pane.agent_status_changed"
+        ]
+    );
+    // Lifecycle kinds are unfiltered; status changes are per pane (herdr
+    // requires a pane_id for them).
+    assert!(subs[..4].iter().all(|s| s.get("pane_id").is_none()));
+    assert_eq!(subs[4]["pane_id"], "w1:p1");
+    assert_eq!(subs[5]["pane_id"], "w2:p3");
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[test]
+fn rejected_subscription_is_an_error() {
+    // herdr rejects the whole request when a listed pane is gone.
+    let reply = "{\"id\":\"s1\",\"error\":{\"code\":\"pane_not_found\",\"message\":\"w1:p9\"}}\n"
+        .to_string();
+    let (sock, _rx) = stub_server("subrej", vec![reply]);
+    let err = SocketEvents::subscribe(&sock, &["w1:p9".to_string()])
+        .err()
+        .expect("error ack must not look like a live stream");
+    assert!(format!("{err:?}").contains("pane_not_found"));
     let _ = std::fs::remove_file(&sock);
 }

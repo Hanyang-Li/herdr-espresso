@@ -14,6 +14,10 @@ impl Waiter for FakeWaiter {
         self.i += 1;
         w
     }
+
+    fn subscribe(&mut self, _ids: &[String]) -> Result<(), HerdrError> {
+        Ok(())
+    }
 }
 
 struct FakeRpc {
