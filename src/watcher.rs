@@ -81,7 +81,10 @@ pub fn run_loop<R: Rpc, W: Waiter, C: EspressoCtl, S: StatusSink>(
             .next_deadline()
             .map(|d| d.saturating_duration_since(now()));
         let outcome = match waiter.wait(timeout) {
-            Wake::Stop => Synced::Stop,
+            Wake::Stop => {
+                eprintln!("herdr-espresso: stop signal, exiting");
+                Synced::Stop
+            }
             Wake::Timeout => Synced::Keep,
             Wake::Event => sync(rpc, waiter, &mut subscribed),
             Wake::Eof => {
@@ -90,6 +93,10 @@ pub fn run_loop<R: Rpc, W: Waiter, C: EspressoCtl, S: StatusSink>(
                 // happening.
                 let n = now();
                 if last_eof.is_some_and(|t| n.saturating_duration_since(t) < RESUBSCRIBE_MIN_GAP) {
+                    eprintln!(
+                        "herdr-espresso: event stream closed twice within {:?}, stopping",
+                        RESUBSCRIBE_MIN_GAP
+                    );
                     Synced::Stop
                 } else {
                     last_eof = Some(n);

@@ -118,6 +118,8 @@ pub fn spawn_watcher(_lock: &ControlLock, dir: &StateDir) -> Spawn {
     let deadline = Instant::now() + READY_TIMEOUT;
     loop {
         if !matches!(child.try_wait(), Ok(None)) {
+            // Same cleanup as the timeout path: no stale tab bar line.
+            dir.remove_statusline();
             return Spawn::Failed;
         }
         if dir.read_pid() == Some(pid) {

@@ -15,6 +15,11 @@ pub const RENEW_RETRY: Duration = Duration::from_secs(10);
 // How long `events.subscribe` may take to acknowledge before we give up.
 pub const SUBSCRIBE_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
+// Read/write bound for a one-shot request/response call. herdr normally
+// answers at once; without a bound, a herdr that accepts but never replies
+// would block the watcher loop forever and stop lease renewal.
+pub const RPC_TIMEOUT: Duration = Duration::from_secs(5);
+
 // Two stream EOFs closer together than this end the watcher instead of
 // resubscribing, so a server that keeps closing the stream cannot spin us.
 pub const RESUBSCRIBE_MIN_GAP: Duration = Duration::from_secs(5);

@@ -97,6 +97,8 @@ tab_bar_right = [
 0.1 逐个 pane 监控，并用 `$espresso` token 在侧边栏给它们打上记号。0.2 改为全局开关：首次运行
 0.2 时会自动停掉旧的按 pane watcher，你可以从 `[ui.sidebar.agents] rows`（以及任何
 `rows_by_agent` 条目）里删掉 `$espresso`。
+0.2 还移除了 `espresso.status` 动作：请删掉绑定到它的快捷键，否则 herdr 会在
+`herdr server reload-config` 的诊断信息里报告它。
 
 ## 工作原理
 

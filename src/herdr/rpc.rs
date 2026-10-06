@@ -2,6 +2,8 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
+use crate::consts::RPC_TIMEOUT;
+use crate::herdr::tolerate_einval;
 use crate::policy::active;
 
 #[derive(Debug)]
@@ -101,6 +103,11 @@ impl SocketRpc {
         let id = format!("r{}", self.seq);
         // Fresh connection per request (herdr closes it after one response).
         let mut stream = UnixStream::connect(&self.path)?;
+        // Bound both directions: a herdr that accepts but never answers must
+        // surface as an Io error, not block the caller forever. A timed-out
+        // read maps to HerdrError::Io via `?` (watcher: stop; notify: best effort).
+        tolerate_einval(stream.set_read_timeout(Some(RPC_TIMEOUT)))?;
+        tolerate_einval(stream.set_write_timeout(Some(RPC_TIMEOUT)))?;
         stream.write_all(request_line(&id, method, params).as_bytes())?;
         stream.flush()?;
         let mut reader = BufReader::new(stream);

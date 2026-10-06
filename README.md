@@ -110,6 +110,8 @@ in your terminal. If you set `XDG_STATE_HOME`, the file lives at
 `$espresso` token. 0.2 replaces that with the global switch: the old per-pane
 watchers are stopped automatically the first time 0.2 runs, and you can remove
 `$espresso` from `[ui.sidebar.agents] rows` (and any `rows_by_agent` entries).
+The `espresso.status` action was also removed in 0.2: remove any keybinding to it,
+or herdr reports it in `herdr server reload-config` diagnostics.
 
 ## How it works
 

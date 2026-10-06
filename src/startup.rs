@@ -9,7 +9,11 @@ pub fn startup() -> i32 {
     let lock = match dir.lock(LOCK_WAIT) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("herdr-espresso: another toggle/startup is still running ({e})");
+            if e.kind() == std::io::ErrorKind::TimedOut {
+                eprintln!("herdr-espresso: another toggle/startup is still running ({e})");
+            } else {
+                eprintln!("herdr-espresso: cannot take the control lock: {e}");
+            }
             return 1;
         }
     };
@@ -31,7 +35,6 @@ pub fn startup() -> i32 {
     match control::spawn_watcher(&lock, &dir) {
         Spawn::Started(_) => 0,
         Spawn::Failed => {
-            dir.remove_statusline();
             eprintln!(
                 "herdr-espresso: watcher failed to start, see {}",
                 dir.log_path().display()

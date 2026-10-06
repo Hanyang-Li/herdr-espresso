@@ -4,8 +4,9 @@ use crate::herdr::{self, Rpc, SocketRpc};
 use crate::store::StateDir;
 
 /// Turn the global keep-awake monitor on or off. Decided by whether a watcher
-/// is actually running, not by the `enabled` file: a watcher that died leaves
-/// the tab bar empty (looks off), and one press must turn it back on.
+/// is actually running, not by the `enabled` file: a watcher that died can
+/// leave `enabled` set (and possibly a stale tab bar line), and one press must
+/// turn it back on.
 pub fn toggle() -> i32 {
     let dir = StateDir::from_env();
     // Held for the whole stop-or-spawn, so a second press (or startup) waits
@@ -13,7 +14,11 @@ pub fn toggle() -> i32 {
     let lock = match dir.lock(LOCK_WAIT) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("herdr-espresso: another toggle/startup is still running ({e})");
+            if e.kind() == std::io::ErrorKind::TimedOut {
+                eprintln!("herdr-espresso: another toggle/startup is still running ({e})");
+            } else {
+                eprintln!("herdr-espresso: cannot take the control lock: {e}");
+            }
             return 1;
         }
     };

@@ -63,7 +63,10 @@ the automated tests stub out. Run them on macOS.
       `$STATE/watcher.pid` and `$STATE/statusline` are gone, and no espresso
       assertion remains.
 
-- [ ] **7. Double press.** With the switch off, press `prefix+/` twice in quick succession. The result is "on, then off": the entry appears briefly (or not at all) and ends hidden, `$STATE/watcher.pid` is gone, and `ps aux | grep "herdr-espresso watch"` shows no watcher left running.
+- [ ] **7. Double press.** With the switch off, press `prefix+/` twice in quick
+      succession. The result is "on, then off": the entry appears briefly (or
+      not at all) and ends hidden, `$STATE/watcher.pid` is gone, and
+      `ps aux | grep "herdr-espresso watch"` shows no watcher left running.
 
 - [ ] **8. Restart restores the switch.** Toggle on, then `herdr server stop`
       and start herdr again. Without pressing anything the tab bar comes back

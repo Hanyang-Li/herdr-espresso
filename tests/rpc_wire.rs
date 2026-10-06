@@ -1,6 +1,6 @@
 //! Wire-shape tests for the herdr socket requests, against a stub of herdr's socket.
 
-use herdr_espresso::consts::SUBSCRIBE_ACK_TIMEOUT;
+use herdr_espresso::consts::{RPC_TIMEOUT, SUBSCRIBE_ACK_TIMEOUT};
 use herdr_espresso::herdr::{Rpc, SocketEvents, SocketRpc};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
@@ -161,4 +161,42 @@ fn subscription_timeout_if_herdr_accepts_but_never_acks() {
     );
     assert!(format!("{err:?}").contains("Io") || format!("{err:?}").contains("timeout"));
     let _ = std::fs::remove_file(&path_clone);
+}
+
+#[test]
+fn call_times_out_if_herdr_accepts_but_never_replies() {
+    // A pane.list that herdr accepts but never answers must not block the
+    // watcher loop (and with it lease renewal) forever. The stub sleeps only
+    // ~10 s, so even a regression cannot hang the suite.
+    let path = std::env::temp_dir().join(format!("he-rpc-{}-rpctimeout.sock", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).expect("bind stub socket");
+    thread::spawn(move || {
+        // The first connection is SocketRpc::connect's probe; hold every
+        // connection open after reading its request line, never replying.
+        for conn in listener.incoming().flatten() {
+            thread::spawn(move || {
+                let mut line = String::new();
+                let _ = BufReader::new(&conn).read_line(&mut line);
+                thread::sleep(std::time::Duration::from_secs(10));
+            });
+        }
+    });
+
+    let mut rpc = SocketRpc::connect(&path.to_string_lossy()).unwrap();
+    let start = Instant::now();
+    let err = rpc.snapshot().expect_err("a silent herdr must time out");
+    let elapsed = start.elapsed();
+
+    assert!(
+        matches!(err, herdr_espresso::herdr::HerdrError::Io(_)),
+        "expected Io timeout, got {err:?}"
+    );
+    assert!(
+        elapsed < RPC_TIMEOUT + std::time::Duration::from_secs(2),
+        "call took {} s, expected at most {:?} + 2s",
+        elapsed.as_secs_f64(),
+        RPC_TIMEOUT
+    );
+    let _ = std::fs::remove_file(&path);
 }

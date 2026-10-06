@@ -4,6 +4,7 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use super::rpc::{reply_error, request_line, HerdrError};
+use super::tolerate_einval;
 use crate::consts::SUBSCRIBE_ACK_TIMEOUT;
 use serde_json::{json, Value};
 
@@ -74,12 +75,8 @@ impl SocketEvents {
         // here rather than look like a healthy stream that never speaks. Bytes
         // the BufReader reads past the ack are events we drop — harmless, the
         // caller snapshots right after subscribing.
-        if let Err(e) = stream.set_read_timeout(Some(SUBSCRIBE_ACK_TIMEOUT)) {
-            // Tolerate EINVAL: the peer has already closed (e.g. in tests after sending reply).
-            if e.raw_os_error() != Some(libc::EINVAL) {
-                return Err(HerdrError::Io(e));
-            }
-        }
+        // Tolerate EINVAL: the peer has already closed (e.g. in tests after sending reply).
+        tolerate_einval(stream.set_read_timeout(Some(SUBSCRIBE_ACK_TIMEOUT)))?;
         let mut reader = BufReader::new(&stream);
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
@@ -92,12 +89,8 @@ impl SocketEvents {
         reply_error(&ack)?;
         // We never parse event payloads — any pushed bytes just mean
         // "re-snapshot" — so from here on poll()+drain handle the stream.
-        if let Err(e) = stream.set_read_timeout(None) {
-            // Tolerate EINVAL: the peer has closed (timeout occurred or connection was reset).
-            if e.raw_os_error() != Some(libc::EINVAL) {
-                return Err(HerdrError::Io(e));
-            }
-        }
+        // Tolerate EINVAL: the peer has closed (timeout occurred or connection was reset).
+        tolerate_einval(stream.set_read_timeout(None))?;
         stream.set_nonblocking(true)?;
         Ok(Self { stream })
     }
