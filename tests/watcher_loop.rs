@@ -37,6 +37,9 @@ impl Rpc for FakeRpc {
     fn notify(&mut self, _t: &str, _b: &str) -> Result<(), HerdrError> {
         Ok(())
     }
+    fn snapshot(&mut self) -> Result<herdr_espresso::herdr::Snapshot, HerdrError> {
+        unimplemented!("the per-pane loop never lists panes")
+    }
 }
 
 #[derive(Default)]

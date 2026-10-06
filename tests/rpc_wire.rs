@@ -105,3 +105,22 @@ fn error_reply_surfaces_as_err() {
     );
     let _ = std::fs::remove_file(&sock);
 }
+
+#[test]
+fn snapshot_lists_all_panes() {
+    let reply = "{\"id\":\"r1\",\"result\":{\"type\":\"pane_list\",\"panes\":[\
+                 {\"pane_id\":\"w1:p1\",\"agent\":\"claude\",\"agent_status\":\"working\"},\
+                 {\"pane_id\":\"w1:p2\",\"agent_status\":\"unknown\"}]}}\n"
+        .to_string();
+    let (sock, rx) = stub_server("list", vec![reply]);
+    let mut rpc = SocketRpc::connect(&sock).unwrap();
+    let snap = rpc.snapshot().expect("pane_list reply -> Ok");
+    assert!(snap.any_active);
+    assert_eq!(snap.pane_ids, vec!["w1:p1", "w1:p2"]);
+
+    let req = request(&rx);
+    assert_eq!(req["method"], "pane.list");
+    // No workspace filter: the watcher needs every pane in the session.
+    assert_eq!(req["params"], serde_json::json!({}));
+    let _ = std::fs::remove_file(&sock);
+}

@@ -3,6 +3,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
 use crate::consts::{MARKER, MARKER_TOKEN, METADATA_SOURCE};
+use crate::policy::active;
 
 #[derive(Debug)]
 pub enum HerdrError {
@@ -69,11 +70,49 @@ pub fn parse_pane_state(reply: &Value) -> PaneState {
     }
 }
 
+/// What the watcher needs from one `pane.list`: whether any agent is active,
+/// and every pane id (to subscribe to each pane's status events).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    pub any_active: bool,
+    /// Sorted, so snapshots of the same panes compare equal.
+    pub pane_ids: Vec<String>,
+}
+
+pub fn parse_snapshot(reply: &Value) -> Result<Snapshot, HerdrError> {
+    reply_error(reply)?;
+    let panes = reply
+        .get("result")
+        .and_then(|r| r.get("panes"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| HerdrError::Protocol("pane.list: no result.panes".into()))?;
+    let any_active = panes.iter().any(|p| {
+        let has_agent = p
+            .get("agent")
+            .and_then(Value::as_str)
+            .is_some_and(|a| !a.is_empty());
+        has_agent
+            && p.get("agent_status")
+                .and_then(Value::as_str)
+                .is_some_and(active)
+    });
+    let mut pane_ids: Vec<String> = panes
+        .iter()
+        .filter_map(|p| p.get("pane_id")?.as_str().map(str::to_string))
+        .collect();
+    pane_ids.sort();
+    Ok(Snapshot {
+        any_active,
+        pane_ids,
+    })
+}
+
 pub trait Rpc {
     fn pane_state(&mut self, pane_id: &str) -> Result<PaneState, HerdrError>;
     fn set_marker(&mut self, pane_id: &str) -> Result<(), HerdrError>;
     fn clear_marker(&mut self, pane_id: &str) -> Result<(), HerdrError>;
     fn notify(&mut self, title: &str, body: &str) -> Result<(), HerdrError>;
+    fn snapshot(&mut self) -> Result<Snapshot, HerdrError>;
 }
 
 pub struct SocketRpc {
@@ -141,6 +180,10 @@ impl Rpc for SocketRpc {
         let reply = self.call("notification.show", json!({"title": title, "body": body}))?;
         reply_error(&reply)
     }
+    fn snapshot(&mut self) -> Result<Snapshot, HerdrError> {
+        let reply = self.call("pane.list", json!({}))?;
+        parse_snapshot(&reply)
+    }
 }
 
 #[cfg(test)]
@@ -184,5 +227,78 @@ mod tests {
     fn parse_state_gone_on_error_reply() {
         let err = json!({"id":"r1","error":{"code":"not_found"}});
         assert_eq!(parse_pane_state(&err), PaneState::Gone);
+    }
+
+    fn list(panes: serde_json::Value) -> serde_json::Value {
+        json!({"id":"r1","result":{"type":"pane_list","panes": panes}})
+    }
+
+    #[test]
+    fn snapshot_no_panes_is_inactive() {
+        let s = parse_snapshot(&list(json!([]))).unwrap();
+        assert_eq!(
+            s,
+            Snapshot {
+                any_active: false,
+                pane_ids: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn snapshot_shells_only_is_inactive_but_lists_every_pane() {
+        let s = parse_snapshot(&list(json!([
+            {"pane_id":"w1:p2","agent_status":"unknown"},
+            {"pane_id":"w1:p1","agent_status":"unknown"}
+        ])))
+        .unwrap();
+        assert!(!s.any_active);
+        // Sorted, so two snapshots of the same panes compare equal.
+        assert_eq!(s.pane_ids, vec!["w1:p1", "w1:p2"]);
+    }
+
+    #[test]
+    fn snapshot_idle_agent_is_inactive() {
+        let s = parse_snapshot(&list(json!([
+            {"pane_id":"w1:p1","agent":"claude","agent_status":"idle"}
+        ])))
+        .unwrap();
+        assert!(!s.any_active);
+    }
+
+    #[test]
+    fn snapshot_working_or_blocked_agent_is_active() {
+        for status in ["working", "blocked"] {
+            let s = parse_snapshot(&list(json!([
+                {"pane_id":"w1:p1","agent":"claude","agent_status":"idle"},
+                {"pane_id":"w2:p1","agent":"codex","agent_status": status}
+            ])))
+            .unwrap();
+            assert!(s.any_active, "{status} should count as active");
+        }
+    }
+
+    #[test]
+    fn snapshot_status_without_agent_is_inactive() {
+        // herdr only reports a real agent through `agent`; a status on a pane
+        // without one never counts.
+        let s = parse_snapshot(&list(json!([
+            {"pane_id":"w1:p1","agent_status":"working"}
+        ])))
+        .unwrap();
+        assert!(!s.any_active);
+    }
+
+    #[test]
+    fn snapshot_error_reply_is_a_protocol_error() {
+        let err = parse_snapshot(&json!({"id":"r1","error":{"code":"internal","message":"x"}}))
+            .expect_err("error reply");
+        assert!(matches!(err, HerdrError::Protocol(m) if m.contains("internal")));
+    }
+
+    #[test]
+    fn snapshot_missing_panes_is_a_protocol_error() {
+        let err = parse_snapshot(&json!({"id":"r1","result":{}})).expect_err("malformed");
+        assert!(matches!(err, HerdrError::Protocol(_)));
     }
 }
