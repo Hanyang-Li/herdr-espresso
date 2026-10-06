@@ -1,6 +1,6 @@
 # herdr-espresso ☕
 
-> Keep your Mac awake while a herdr pane's coding agent is working — automatically, per pane.
+> Keep your Mac awake while any coding agent in herdr is working — one switch for all of herdr.
 
 **English** | [简体中文](README.zh-CN.md)
 
@@ -8,33 +8,32 @@
 ![platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)
 
 `herdr-espresso` is a [herdr](https://github.com/ogulcancelik/herdr) plugin that
-keeps macOS awake while a monitored pane's coding agent is actively working, and
-lets the Mac sleep again once the agent goes idle. It drives the
-[`espresso`](https://github.com/Hanyang-Li/espresso) CLI: for each pane you turn
-monitoring on, a small detached watcher subscribes to that pane's agent-status
-events over the herdr socket and holds (or releases) an `espresso` session
-accordingly.
+keeps macOS awake while any agent in herdr is actively working, and lets the Mac
+sleep again once they have all stopped. It drives the
+[`espresso`](https://github.com/Hanyang-Li/espresso) CLI: when you switch it on,
+one small detached watcher follows every pane's agent status over the herdr
+socket and holds (or releases) an `espresso` session accordingly.
 
-- **Working/blocked → awake.** While the agent is active the Mac won't sleep
-  (and, with espresso's lid-closed helper installed, stays awake even with the
-  lid shut).
-- **Idle/done → sleep.** When the agent stops, `espresso` is released after a
-  short grace period; the pane stays monitored and re-acquires it the next time
-  the agent becomes active.
-- **Per pane, fully automatic.** Toggle it once per pane; multiple panes are
-  monitored independently. Closing the pane — or the agent exiting — stops that
-  pane's monitor automatically.
+- **Any agent working/blocked → awake.** While at least one agent is active the
+  Mac won't sleep (and, with espresso's lid-closed helper installed, stays awake
+  even with the lid shut).
+- **All idle/done → sleep.** When the last active agent stops, `espresso` is
+  released after a short grace period; the switch stays on and re-acquires it
+  the next time any agent becomes active.
+- **One switch for all of herdr.** Toggle it once; it covers every workspace,
+  tab and pane, including ones opened later, and survives herdr restarts.
 
 ## Features
 
-- **Follows the agent.** No manual on/off — monitoring tracks the agent's state.
-- **Only agent panes.** Toggling a plain shell is declined with a notification
-  (a shell has no working/idle state to track).
-- **Sidebar marker.** An `espresso` label can appear next to a monitored pane
-  and disappears when monitoring stops — one line of herdr config away (see
-  [Sidebar marker](#sidebar-marker)).
-- **Self-healing.** `espresso` is held via a short lease renewed while the agent
-  works, so a crashed watcher can never pin the Mac awake — the lease expires on
+- **Follows every agent.** No per-pane setup — panes and agents that appear
+  later are picked up automatically.
+- **Tab bar status.** `󰅶 awake` / `󰛊 idle` on the right of herdr's tab bar while
+  the switch is on, nothing while it is off — one line of herdr config away
+  (see [Tab bar status](#tab-bar-status)).
+- **Remembers the switch.** Turned on, it comes back on by itself after herdr
+  restarts.
+- **Self-healing.** `espresso` is held via a short lease renewed while agents
+  work, so a crashed watcher can never pin the Mac awake — the lease expires on
   its own within ~90s.
 - **Event-driven.** The watcher blocks in the kernel and uses ~0% CPU while
   idle; toggle-off is instant.
@@ -42,7 +41,7 @@ accordingly.
 ## Requirements
 
 - **macOS only.**
-- [herdr](https://github.com/ogulcancelik/herdr) **0.7.0** or later.
+- [herdr](https://github.com/ogulcancelik/herdr) **0.8.2** or later.
 - The [`espresso`](https://github.com/Hanyang-Li/espresso) CLI installed and on
   your `PATH`. Install it with:
   ```sh
@@ -50,7 +49,7 @@ accordingly.
   ```
 - **Optional:** run `espresso daemon install` once (requires `sudo`) so the Mac
   also stays awake with the **lid closed**. Without it, only idle/display sleep
-  is prevented; toggling monitoring on shows a one-time reminder.
+  is prevented; switching on shows a reminder.
 
 ## Installation
 
@@ -62,7 +61,7 @@ herdr clones the repo, runs the build hook (`cargo build --release`), and
 registers the plugin. Pin a specific version with `--ref`:
 
 ```sh
-herdr plugin install Hanyang-Li/herdr-espresso --ref v0.1.0
+herdr plugin install Hanyang-Li/herdr-espresso --ref v0.2.0
 ```
 
 ## Keybinding
@@ -75,60 +74,62 @@ the `espresso.toggle` action, for example:
 key = "prefix+/"
 type = "plugin_action"
 command = "espresso.toggle"
-description = "espresso: toggle monitor on focused pane"
+description = "espresso: toggle global keep-awake"
 ```
 
-Press it while an **agent** pane is focused to toggle monitoring for that pane.
-Toggling a pane with no agent is declined with a notification.
+Press it anywhere to switch keep-awake on or off for all of herdr. A toast
+confirms each switch. The action is also listed in herdr's command palette as
+**Espresso: toggle global keep-awake**.
 
-## Sidebar marker
+## Tab bar status
 
-While a pane is monitored, the plugin reports an `espresso` **pane metadata
-token**. herdr renders a plugin token only where a sidebar row template asks for
-it by name, so add `$espresso` to your expanded agent rows:
+While the switch is on, the plugin writes its state to a small file that a
+herdr tab bar entry can display. Add a command entry to `ui.tab_bar_right`:
 
 ```toml
-[ui.sidebar.agents]
-rows = [["state_icon", "workspace", "tab"], ["agent", "$espresso"]]
+[ui]
+tab_bar_right = [
+  { type = "command", command = "cat ~/.local/state/herdr/plugins/espresso/statusline", interval_seconds = 2, timeout_seconds = 1 },
+]
 ```
 
-Custom tokens must keep the `$` prefix — herdr rejects the row otherwise. A
-token occurrence can also be styled (herdr 0.7.5+):
+| Shown | Meaning |
+|---|---|
+| `󰅶 awake` | On, and at least one agent is working or blocked — the Mac stays awake. |
+| `󰛊 idle` | On, all agents idle — the Mac may sleep. |
+| *(nothing)* | Off. |
 
-```toml
-rows = [["state_icon", "workspace", "tab"], ["agent", { token = "$espresso", dim = true }]]
-```
+The icons are Nerd Font glyphs (md-coffee, md-coffee_outline); use a Nerd Font
+in your terminal. If you set `XDG_STATE_HOME`, the file lives at
+`$XDG_STATE_HOME/herdr/plugins/espresso/statusline` instead. Other entries
+(`datetime`, `hostname`, …) can sit alongside it in the same list.
 
-Two things worth knowing:
+### Upgrading from 0.1
 
-- A `rows_by_agent` entry **replaces** `rows` for that agent, so add the token
-  there too if you override rows per agent:
-  ```toml
-  [ui.sidebar.agents.rows_by_agent]
-  claude = [["state_icon", "workspace", "tab"], ["terminal_title_stripped"], ["agent", "$espresso"]]
-  ```
-- Without the row config, monitoring works exactly the same — there is just
-  nothing to see in the sidebar. `herdr server reload-config` reports any
-  mistake in the row template in its `diagnostics`.
+0.1 monitored panes one at a time and marked them in the sidebar with a
+`$espresso` token. 0.2 replaces that with the global switch: the old per-pane
+watchers are stopped automatically the first time 0.2 runs, and you can remove
+`$espresso` from `[ui.sidebar.agents] rows` (and any `rows_by_agent` entries).
 
 ## How it works
 
-- **Working/blocked → awake.** The watcher holds `espresso` via a short
-  90-second lease that it renews (rotates) every 60 seconds while the agent
+- **One watcher.** Switching on starts one detached watcher. It subscribes to
+  herdr's pane lifecycle events plus every pane's agent-status events, and
+  re-reads the pane list (`pane.list`) whenever something changes; when panes
+  come or go it rebuilds the subscription.
+- **Any working/blocked → awake.** The watcher holds `espresso` via a short
+  90-second lease that it renews (rotates) every 60 seconds while any agent
   stays active, so the hold never has a coverage gap.
-- **Idle/done → release after grace.** After the agent stops being active, the
-  watcher waits ~5 seconds (so a brief flip back to active doesn't thrash it)
-  before releasing `espresso`. Monitoring continues.
-- **Agent exit / pane close → stop.** If the pane closes, or the agent exits
-  and the pane returns to a plain shell, the watcher stops on its own: it
-  releases `espresso` and clears the marker token.
+- **All idle/done → release after grace.** Once no agent is active, the watcher
+  waits ~5 seconds (so a brief flip back to active doesn't thrash it) before
+  releasing `espresso`. The switch stays on.
 - **Self-healing lease.** Because the lease is short and renewed rather than
   held open-ended, a watcher that dies unexpectedly (crash, `kill -9`) can't
   keep the Mac awake — its `espresso` lease expires within ~90 seconds.
-- **Detach-safe.** The watcher runs detached in its own session, so detaching
-  from herdr doesn't stop monitoring; `herdr server stop` cleans it up.
-- **Per-pane independence.** Each monitored pane has its own watcher and its own
-  `espresso` hold; toggling or closing one has no effect on others.
+- **Restart-safe.** The switch is remembered in herdr's plugin state dir; when
+  the herdr server starts, the plugin's startup hook brings the watcher back.
+  Detaching a client doesn't affect it; `herdr server stop` ends it. Toggle and
+  startup take a lock (`watcher.lock`) so they never race each other.
 
 ## Uninstalling
 
