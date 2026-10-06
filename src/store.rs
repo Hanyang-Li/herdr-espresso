@@ -12,7 +12,7 @@ const STATUSLINE_TMP: &str = ".statusline.tmp";
 const LOG: &str = "watcher.log";
 
 pub fn pid_alive(pid: i32) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
+    pid > 0 && unsafe { libc::kill(pid, 0) == 0 }
 }
 
 pub fn read_pid_at(path: &Path) -> Option<i32> {
@@ -121,7 +121,20 @@ impl StateDir {
                     if self.read_pid().is_some_and(&is_live) {
                         return Reserve::Busy;
                     }
-                    remove_quietly(&path);
+                    // Stale pidfile: atomically rename it to claim it, then retry.
+                    // Only the reserver whose rename succeeds will remove the stale file.
+                    let stale_path =
+                        self.path(&format!(".watcher.pid.stale.{}", std::process::id()));
+                    match std::fs::rename(&path, &stale_path) {
+                        Ok(()) => {
+                            // We won the rename; remove the stale file and retry.
+                            remove_quietly(&stale_path);
+                        }
+                        Err(e) if e.kind() == ErrorKind::NotFound => {
+                            // Someone else renamed it already; just retry create_new.
+                        }
+                        Err(_) => return Reserve::Failed,
+                    }
                 }
                 Err(_) => return Reserve::Failed,
             }
@@ -237,5 +250,35 @@ mod tests {
     fn pid_alive_for_self_only() {
         assert!(pid_alive(std::process::id() as i32));
         assert!(!pid_alive(999_999_999));
+    }
+
+    #[test]
+    fn pid_alive_guards_against_invalid_pids() {
+        assert!(!pid_alive(0));
+        assert!(!pid_alive(-1));
+    }
+
+    #[test]
+    fn stale_takeover_leaves_no_stale_files() {
+        let dir = temp_dir("stale-cleanup");
+        // First reservation succeeds.
+        assert_eq!(dir.try_reserve_pid(|_| true), Reserve::Reserved);
+        assert_eq!(dir.read_pid(), Some(std::process::id() as i32));
+
+        // Takeover of stale pidfile succeeds.
+        assert_eq!(dir.try_reserve_pid(|_| false), Reserve::Reserved);
+
+        // Verify no stale files were left behind after the takeover.
+        let entries: Vec<_> = std::fs::read_dir(dir.root())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .filter(|n| n.to_string_lossy().contains("stale"))
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "stale pidfiles left behind: {:?}",
+            entries
+        );
     }
 }
