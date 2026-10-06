@@ -2,11 +2,13 @@
 //! state dir. Paths go through a `StateDir` value rather than a global so each
 //! test can use its own temp dir.
 
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 const ENABLED: &str = "enabled";
 const PIDFILE: &str = "watcher.pid";
+const LOCKFILE: &str = "watcher.lock";
 const STATUSLINE: &str = "statusline";
 const STATUSLINE_TMP: &str = ".statusline.tmp";
 const LOG: &str = "watcher.log";
@@ -101,46 +103,40 @@ impl StateDir {
 
     /// Atomically claim the pidfile (holding our own pid as a placeholder) so
     /// two concurrent toggles cannot both start a watcher. A pidfile whose pid
-    /// fails `is_live` is stale and is taken over.
+    /// fails `is_live` is stale and is taken over. Reservers are serialized by
+    /// an exclusive flock on `watcher.lock`, so check-and-claim is atomic.
     pub fn try_reserve_pid(&self, is_live: impl Fn(i32) -> bool) -> Reserve {
         if std::fs::create_dir_all(&self.root).is_err() {
             return Reserve::Failed;
         }
-        let path = self.path(PIDFILE);
-        for _ in 0..2 {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(mut f) => {
-                    let _ = write!(f, "{}", std::process::id());
-                    return Reserve::Reserved;
-                }
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                    if self.read_pid().is_some_and(&is_live) {
-                        return Reserve::Busy;
-                    }
-                    // Stale pidfile: atomically rename it to claim it, then retry.
-                    // Only the reserver whose rename succeeds will remove the stale file.
-                    let stale_path =
-                        self.path(&format!(".watcher.pid.stale.{}", std::process::id()));
-                    match std::fs::rename(&path, &stale_path) {
-                        Ok(()) => {
-                            // We won the rename; remove the stale file and retry.
-                            remove_quietly(&stale_path);
-                        }
-                        Err(e) if e.kind() == ErrorKind::NotFound => {
-                            // Someone else renamed it already; just retry create_new.
-                        }
-                        Err(_) => return Reserve::Failed,
-                    }
-                }
-                Err(_) => return Reserve::Failed,
-            }
+
+        // Open and lock the lockfile to serialize check-and-claim.
+        let lock_path = self.path(LOCKFILE);
+        let lock_file = match std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(f) => f,
+            Err(_) => return Reserve::Failed,
+        };
+
+        // Acquire exclusive lock (released when lock_file is dropped).
+        if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Reserve::Failed;
         }
-        // Lost the takeover race to another reserver.
-        Reserve::Busy
+
+        // Check-and-claim is now atomic (while holding the lock).
+        if self.read_pid().is_some_and(&is_live) {
+            return Reserve::Busy;
+        }
+
+        // Pidfile is either missing or stale; claim it.
+        match std::fs::write(self.path(PIDFILE), std::process::id().to_string()) {
+            Ok(()) => Reserve::Reserved,
+            Err(_) => Reserve::Failed,
+        }
+        // Lock is released when lock_file is dropped.
     }
 
     /// Replace the tab bar line atomically (write + rename), so the tab bar's
@@ -259,26 +255,40 @@ mod tests {
     }
 
     #[test]
-    fn stale_takeover_leaves_no_stale_files() {
-        let dir = temp_dir("stale-cleanup");
-        // First reservation succeeds.
-        assert_eq!(dir.try_reserve_pid(|_| true), Reserve::Reserved);
+    fn concurrent_reserve_serialized_by_lock() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let dir = Arc::new(temp_dir("concurrent"));
+
+        // Write a stale pidfile.
+        dir.write_pid(999_999_999).unwrap();
+
+        let reserved_count = Arc::new(AtomicUsize::new(0));
+        let busy_count = Arc::new(AtomicUsize::new(0));
+
+        // Spawn 8 threads that race to reserve.
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                let dir = Arc::clone(&dir);
+                let reserved_count = Arc::clone(&reserved_count);
+                let busy_count = Arc::clone(&busy_count);
+
+                s.spawn(move || {
+                    match dir.try_reserve_pid(pid_alive) {
+                        Reserve::Reserved => reserved_count.fetch_add(1, Ordering::SeqCst),
+                        Reserve::Busy => busy_count.fetch_add(1, Ordering::SeqCst),
+                        result => panic!("Unexpected result: {:?}", result),
+                    };
+                });
+            }
+        });
+
+        // Exactly one thread should have reserved, the rest should see busy.
+        assert_eq!(reserved_count.load(Ordering::SeqCst), 1);
+        assert_eq!(busy_count.load(Ordering::SeqCst), 7);
+
+        // The pidfile should contain the current process's pid.
         assert_eq!(dir.read_pid(), Some(std::process::id() as i32));
-
-        // Takeover of stale pidfile succeeds.
-        assert_eq!(dir.try_reserve_pid(|_| false), Reserve::Reserved);
-
-        // Verify no stale files were left behind after the takeover.
-        let entries: Vec<_> = std::fs::read_dir(dir.root())
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|e| e.file_name())
-            .filter(|n| n.to_string_lossy().contains("stale"))
-            .collect();
-        assert!(
-            entries.is_empty(),
-            "stale pidfiles left behind: {:?}",
-            entries
-        );
     }
 }
