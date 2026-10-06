@@ -81,7 +81,7 @@ the automated tests stub out. Run them on macOS.
       fresh watcher (a dead watcher counts as off).
 
 - [ ] **10. Upgrade from 0.1 cleans up.** With 0.1 installed, monitor a pane so
-      its sidebar shows `espresso`. Link 0.2 and press `prefix+/`. The old
+      its sidebar shows `espresso`. Link 1.0 and press `prefix+/`. The old
       per-pane watcher exits, the sidebar marker disappears, and
       `$STATE/*.pid` contains only `watcher.pid`.
 

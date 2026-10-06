@@ -61,7 +61,7 @@ herdr clones the repo, runs the build hook (`cargo build --release`), and
 registers the plugin. Pin a specific version with `--ref`:
 
 ```sh
-herdr plugin install Hanyang-Li/herdr-espresso --ref v0.2.0
+herdr plugin install Hanyang-Li/herdr-espresso --ref v1.0.0
 ```
 
 ## Keybinding
@@ -107,10 +107,10 @@ in your terminal. If you set `XDG_STATE_HOME`, the file lives at
 ### Upgrading from 0.1
 
 0.1 monitored panes one at a time and marked them in the sidebar with a
-`$espresso` token. 0.2 replaces that with the global switch: the old per-pane
-watchers are stopped automatically the first time 0.2 runs, and you can remove
+`$espresso` token. 1.0 replaces that with the global switch: the old per-pane
+watchers are stopped automatically the first time 1.0 runs, and you can remove
 `$espresso` from `[ui.sidebar.agents] rows` (and any `rows_by_agent` entries).
-The `espresso.status` action was also removed in 0.2: remove any keybinding to it,
+The `espresso.status` action was also removed in 1.0: remove any keybinding to it,
 or herdr reports it in `herdr server reload-config` diagnostics.
 
 ## How it works

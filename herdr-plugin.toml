@@ -1,6 +1,6 @@
 id = "espresso"
 name = "Espresso Guard"
-version = "0.2.0"
+version = "1.0.0"
 min_herdr_version = "0.8.2"
 description = "Keep macOS awake (incl. lid-closed) while any herdr agent is working."
 platforms = ["macos"]
