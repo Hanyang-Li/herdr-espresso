@@ -20,3 +20,9 @@ pub const RENEW_RETRY: Duration = Duration::from_secs(10);
 
 // How long `events.subscribe` may take to acknowledge before we give up.
 pub const SUBSCRIBE_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+
+// Two stream EOFs closer together than this end the watcher instead of
+// resubscribing, so a server that keeps closing the stream cannot spin us.
+pub const RESUBSCRIBE_MIN_GAP: Duration = Duration::from_secs(5);
+// Snapshot/subscribe rounds per sync before settling for the latest snapshot.
+pub const SYNC_ROUNDS: usize = 3;

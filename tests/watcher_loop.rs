@@ -1,48 +1,106 @@
+use herdr_espresso::consts::{STATUS_AWAKE, STATUS_IDLE};
 use herdr_espresso::espresso::{EspressoCtl, EspressoError};
-use herdr_espresso::herdr::{HerdrError, PaneState, Rpc, Waiter, Wake};
-use herdr_espresso::watcher::run_loop;
+use herdr_espresso::herdr::{HerdrError, PaneState, Rpc, Snapshot, Waiter, Wake};
+use herdr_espresso::watcher::{run_loop, StatusSink};
 use std::time::{Duration, Instant};
 
-// Scripted waiter: yields a sequence of Wake values, then Eof forever.
-struct FakeWaiter {
-    script: Vec<Wake>,
-    i: usize,
+/// One scripted `pane.list` outcome.
+#[derive(Clone)]
+enum List {
+    Panes(bool, &'static [&'static str]),
+    Rejected,
+    Unreachable,
 }
-impl Waiter for FakeWaiter {
-    fn wait(&mut self, _t: Option<Duration>) -> Wake {
-        let w = self.script.get(self.i).copied().unwrap_or(Wake::Eof);
-        self.i += 1;
-        w
-    }
 
-    fn subscribe(&mut self, _ids: &[String]) -> Result<(), HerdrError> {
-        Ok(())
-    }
+fn io_err() -> HerdrError {
+    HerdrError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))
 }
 
 struct FakeRpc {
-    states: Vec<PaneState>,
+    script: Vec<List>,
     i: usize,
-    marker_cleared: bool,
+}
+impl FakeRpc {
+    fn new(script: Vec<List>) -> Self {
+        Self { script, i: 0 }
+    }
 }
 impl Rpc for FakeRpc {
-    fn pane_state(&mut self, _p: &str) -> Result<PaneState, HerdrError> {
-        let s = self.states.get(self.i).cloned().unwrap_or(PaneState::Gone);
+    // Old per-pane methods, still on the trait; Task 5 removes them.
+    fn pane_state(&mut self, _id: &str) -> Result<PaneState, HerdrError> {
+        unimplemented!()
+    }
+    fn set_marker(&mut self, _id: &str) -> Result<(), HerdrError> {
+        unimplemented!()
+    }
+    fn clear_marker(&mut self, _id: &str) -> Result<(), HerdrError> {
+        unimplemented!()
+    }
+    fn snapshot(&mut self) -> Result<Snapshot, HerdrError> {
+        let step = self
+            .script
+            .get(self.i)
+            .cloned()
+            .unwrap_or(List::Unreachable);
         self.i += 1;
-        Ok(s)
-    }
-    fn set_marker(&mut self, _p: &str) -> Result<(), HerdrError> {
-        Ok(())
-    }
-    fn clear_marker(&mut self, _p: &str) -> Result<(), HerdrError> {
-        self.marker_cleared = true;
-        Ok(())
+        match step {
+            List::Panes(any_active, ids) => Ok(Snapshot {
+                any_active,
+                pane_ids: ids.iter().map(|s| s.to_string()).collect(),
+            }),
+            List::Rejected => Err(HerdrError::Protocol("internal".into())),
+            List::Unreachable => Err(io_err()),
+        }
     }
     fn notify(&mut self, _t: &str, _b: &str) -> Result<(), HerdrError> {
         Ok(())
     }
-    fn snapshot(&mut self) -> Result<herdr_espresso::herdr::Snapshot, HerdrError> {
-        unimplemented!("the per-pane loop never lists panes")
+}
+
+/// One scripted `subscribe` outcome.
+#[derive(Clone, Copy)]
+enum Sub {
+    Ok,
+    Rejected,
+    Unreachable,
+}
+
+/// Yields scripted wakes (then `Stop` forever) and scripted subscribe
+/// outcomes (then `Ok`), recording every subscribe attempt.
+struct FakeWaiter {
+    wakes: Vec<Wake>,
+    waited: usize,
+    subs: Vec<Sub>,
+    attempts: Vec<Vec<String>>,
+}
+impl FakeWaiter {
+    fn new(wakes: Vec<Wake>, subs: Vec<Sub>) -> Self {
+        Self {
+            wakes,
+            waited: 0,
+            subs,
+            attempts: Vec::new(),
+        }
+    }
+}
+impl Waiter for FakeWaiter {
+    fn wait(&mut self, _t: Option<Duration>) -> Wake {
+        let w = self.wakes.get(self.waited).copied().unwrap_or(Wake::Stop);
+        self.waited += 1;
+        w
+    }
+    fn subscribe(&mut self, ids: &[String]) -> Result<(), HerdrError> {
+        let outcome = self
+            .subs
+            .get(self.attempts.len())
+            .copied()
+            .unwrap_or(Sub::Ok);
+        self.attempts.push(ids.to_vec());
+        match outcome {
+            Sub::Ok => Ok(()),
+            Sub::Rejected => Err(HerdrError::Protocol("pane_not_found".into())),
+            Sub::Unreachable => Err(io_err()),
+        }
     }
 }
 
@@ -71,121 +129,223 @@ impl EspressoCtl for FakeEsp {
     }
 }
 
-fn working() -> PaneState {
-    PaneState::Agent("working".into())
+#[derive(Default)]
+struct FakeSink {
+    shown: Vec<String>,
+    cleared: bool,
+}
+impl StatusSink for FakeSink {
+    fn show(&mut self, line: &str) {
+        self.shown.push(line.to_string());
+        self.cleared = false;
+    }
+    fn clear(&mut self) {
+        self.cleared = true;
+    }
 }
 
-#[test]
-fn seeded_working_opens_then_pane_closed_cleans_up() {
-    // Seed reads working -> rotate. First event's state is Gone (pane closed)
-    // -> break -> cleanup.
-    let mut waiter = FakeWaiter {
-        script: vec![Wake::Event],
-        i: 0,
-    };
-    let mut rpc = FakeRpc {
-        states: vec![working(), PaneState::Gone],
-        i: 0,
-        marker_cleared: false,
-    };
-    let mut esp = FakeEsp::default();
-    let t0 = Instant::now();
-    run_loop("w1:p1", &mut rpc, &mut waiter, &mut esp, move || t0);
-    assert_eq!(esp.rotates, 1); // opened from the seed
-    assert_eq!(esp.kills, 1); // killed during cleanup
-    assert!(rpc.marker_cleared);
+const A: &[&str] = &["w1:p1"];
+const AB: &[&str] = &["w1:p1", "w1:p2"];
+
+fn ids(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
 }
 
-#[test]
-fn seeded_active_opens_without_any_event() {
-    // No events at all (Waiter yields Eof immediately). A pane already working
-    // at toggle-on must acquire the lease from the seed alone.
-    let mut waiter = FakeWaiter {
-        script: vec![],
-        i: 0,
-    };
-    let mut rpc = FakeRpc {
-        states: vec![working()],
-        i: 0,
-        marker_cleared: false,
-    };
-    let mut esp = FakeEsp::default();
-    let t0 = Instant::now();
-    run_loop("w1:p1", &mut rpc, &mut waiter, &mut esp, move || t0);
-    assert_eq!(esp.rotates, 1);
-    assert_eq!(esp.kills, 1); // cleanup
-    assert!(rpc.marker_cleared);
-}
-
-#[test]
-fn stop_signal_closes_immediately() {
-    // Toggle-off: the Stop wake breaks the loop at once and cleanup kills
-    // espresso — no stop-grace involved.
-    let mut waiter = FakeWaiter {
-        script: vec![Wake::Stop],
-        i: 0,
-    };
-    let mut rpc = FakeRpc {
-        states: vec![working()],
-        i: 0,
-        marker_cleared: false,
-    };
-    let mut esp = FakeEsp::default();
-    let t0 = Instant::now();
-    run_loop("w1:p1", &mut rpc, &mut waiter, &mut esp, move || t0);
-    assert_eq!(esp.rotates, 1); // opened from seed
-    assert_eq!(esp.kills, 1); // closed by cleanup on stop
-    assert!(rpc.marker_cleared);
-}
-
-#[test]
-fn agent_exit_closes_watcher_even_though_pane_stays_open() {
-    // The pane stays open but the agent exits -> pane.get reports NoAgent ->
-    // the watcher stops (cleanup releases espresso and clears the marker).
-    let mut waiter = FakeWaiter {
-        script: vec![Wake::Event],
-        i: 0,
-    };
-    let mut rpc = FakeRpc {
-        states: vec![working(), PaneState::NoAgent],
-        i: 0,
-        marker_cleared: false,
-    };
-    let mut esp = FakeEsp::default();
-    let t0 = Instant::now();
-    run_loop("w1:p1", &mut rpc, &mut waiter, &mut esp, move || t0);
-    assert_eq!(esp.rotates, 1); // opened from seed
-    assert_eq!(esp.kills, 1); // closed when the agent went away
-    assert!(rpc.marker_cleared); // marker removed on cleanup
-}
-
-#[test]
-fn idle_event_then_stop_grace_timer_closes() {
-    // Working -> an idle event arms the 5s stop-grace (no immediate close);
-    // a later timer wake (deadline elapsed) fires the close via on_timer, not
-    // via the final cleanup. Note: idle keeps monitoring (agent still present).
-    let mut waiter = FakeWaiter {
-        script: vec![Wake::Event, Wake::Timeout],
-        i: 0,
-    };
-    let mut rpc = FakeRpc {
-        states: vec![working(), PaneState::Agent("idle".into())],
-        i: 0,
-        marker_cleared: false,
-    };
-    let mut esp = FakeEsp::default();
-    // Advancing clock (+10s per call) so the 5s stop-grace elapses between the
-    // idle event and the next timer wake.
+/// A clock that advances 10 s on every read, so the 5 s stop-grace elapses
+/// between consecutive steps.
+fn advancing() -> impl FnMut() -> Instant {
     let start = Instant::now();
     let mut ticks = 0u64;
-    let clock = move || {
+    move || {
         let t = start + Duration::from_secs(ticks * 10);
         ticks += 1;
         t
-    };
-    run_loop("w1:p1", &mut rpc, &mut waiter, &mut esp, clock);
-    assert_eq!(esp.rotates, 1); // opened from seed (working)
-                                // Closed by the stop-grace timer; the cleanup kill is then a no-op, so
-                                // exactly 1 proves the timer (not cleanup) did the close.
+    }
+}
+
+fn run(
+    rpc: &mut FakeRpc,
+    waiter: &mut FakeWaiter,
+    clock: impl FnMut() -> Instant,
+) -> (FakeEsp, FakeSink) {
+    let mut esp = FakeEsp::default();
+    let mut sink = FakeSink::default();
+    run_loop(rpc, waiter, &mut esp, &mut sink, clock);
+    (esp, sink)
+}
+
+#[test]
+fn seeded_active_holds_and_shows_awake_until_stop() {
+    // Subscribe first, then the snapshot taken under the live subscription
+    // decides — herdr does not replay events from before a subscription.
+    let mut rpc = FakeRpc::new(vec![List::Panes(true, A), List::Panes(true, A)]);
+    let mut waiter = FakeWaiter::new(vec![Wake::Stop], vec![]);
+    let t0 = Instant::now();
+    let (esp, sink) = run(&mut rpc, &mut waiter, move || t0);
+    assert_eq!(waiter.attempts, vec![ids(A)]);
+    assert_eq!(rpc.i, 2);
+    assert_eq!(esp.rotates, 1);
+    assert_eq!(esp.kills, 1); // cleanup on Stop
+    assert_eq!(sink.shown, vec![STATUS_AWAKE]);
+    assert!(sink.cleared);
+}
+
+#[test]
+fn seeded_idle_shows_idle() {
+    let mut rpc = FakeRpc::new(vec![List::Panes(false, A), List::Panes(false, A)]);
+    let mut waiter = FakeWaiter::new(vec![Wake::Stop], vec![]);
+    let t0 = Instant::now();
+    let (esp, sink) = run(&mut rpc, &mut waiter, move || t0);
+    assert_eq!(esp.rotates, 0);
+    assert_eq!(sink.shown, vec![STATUS_IDLE]);
+    assert!(sink.cleared);
+}
+
+#[test]
+fn all_idle_releases_after_grace_and_shows_idle() {
+    let mut rpc = FakeRpc::new(vec![
+        List::Panes(true, A),
+        List::Panes(true, A),
+        List::Panes(false, A),
+    ]);
+    let mut waiter = FakeWaiter::new(vec![Wake::Event, Wake::Timeout, Wake::Stop], vec![]);
+    let (esp, sink) = run(&mut rpc, &mut waiter, advancing());
+    assert_eq!(esp.rotates, 1);
+    // Released by the stop-grace timer; the cleanup kill is then a no-op, so
+    // exactly 1 proves the timer did it.
     assert_eq!(esp.kills, 1);
+    assert_eq!(sink.shown, vec![STATUS_AWAKE, STATUS_IDLE]);
+}
+
+#[test]
+fn reactivating_within_grace_keeps_holding() {
+    let mut rpc = FakeRpc::new(vec![
+        List::Panes(true, A),
+        List::Panes(true, A),
+        List::Panes(false, A),
+        List::Panes(true, A),
+    ]);
+    let mut waiter = FakeWaiter::new(vec![Wake::Event, Wake::Event, Wake::Stop], vec![]);
+    let t0 = Instant::now();
+    let (esp, sink) = run(&mut rpc, &mut waiter, move || t0);
+    assert_eq!(esp.rotates, 1);
+    assert_eq!(esp.kills, 1); // only the cleanup
+    assert_eq!(sink.shown, vec![STATUS_AWAKE]);
+}
+
+#[test]
+fn rejected_list_keeps_the_previous_state() {
+    // If the error were read as "nothing active", the stop-grace timer would
+    // release espresso and the line would flip to idle.
+    let mut rpc = FakeRpc::new(vec![
+        List::Panes(true, A),
+        List::Panes(true, A),
+        List::Rejected,
+    ]);
+    let mut waiter = FakeWaiter::new(vec![Wake::Event, Wake::Timeout, Wake::Stop], vec![]);
+    let (esp, sink) = run(&mut rpc, &mut waiter, advancing());
+    assert_eq!(esp.rotates, 1);
+    assert_eq!(esp.kills, 1); // only the cleanup
+    assert_eq!(sink.shown, vec![STATUS_AWAKE]);
+}
+
+#[test]
+fn unreachable_list_exits_and_cleans_up() {
+    let mut rpc = FakeRpc::new(vec![
+        List::Panes(true, A),
+        List::Panes(true, A),
+        List::Unreachable,
+    ]);
+    let mut waiter = FakeWaiter::new(vec![Wake::Event, Wake::Event], vec![]);
+    let t0 = Instant::now();
+    let (esp, sink) = run(&mut rpc, &mut waiter, move || t0);
+    assert_eq!(waiter.waited, 1);
+    assert_eq!(esp.kills, 1);
+    assert!(sink.cleared);
+}
+
+#[test]
+fn new_pane_resubscribes_then_resnapshots() {
+    // A pane appears (idle), and its agent is already working by the time the
+    // new subscription is live: the post-subscribe snapshot must catch it.
+    let mut rpc = FakeRpc::new(vec![
+        List::Panes(false, A),
+        List::Panes(false, A),
+        List::Panes(false, AB),
+        List::Panes(true, AB),
+    ]);
+    let mut waiter = FakeWaiter::new(vec![Wake::Event, Wake::Stop], vec![]);
+    let t0 = Instant::now();
+    let (esp, sink) = run(&mut rpc, &mut waiter, move || t0);
+    assert_eq!(waiter.attempts, vec![ids(A), ids(AB)]);
+    assert_eq!(rpc.i, 4);
+    assert_eq!(esp.rotates, 1);
+    assert_eq!(sink.shown, vec![STATUS_IDLE, STATUS_AWAKE]);
+}
+
+#[test]
+fn rejected_subscription_retries_with_a_fresh_list() {
+    // w1:p2 closed between pane.list and events.subscribe.
+    let mut rpc = FakeRpc::new(vec![
+        List::Panes(false, AB),
+        List::Panes(true, A),
+        List::Panes(true, A),
+    ]);
+    let mut waiter = FakeWaiter::new(vec![Wake::Stop], vec![Sub::Rejected, Sub::Ok]);
+    let t0 = Instant::now();
+    let (esp, _sink) = run(&mut rpc, &mut waiter, move || t0);
+    assert_eq!(waiter.attempts, vec![ids(AB), ids(A)]);
+    assert_eq!(esp.rotates, 1);
+}
+
+#[test]
+fn never_subscribed_exits_without_waiting() {
+    // With no stream nothing would ever wake the loop, so it must not start.
+    let mut rpc = FakeRpc::new(vec![List::Panes(true, A); 3]);
+    let mut waiter = FakeWaiter::new(
+        vec![Wake::Stop],
+        vec![Sub::Rejected, Sub::Rejected, Sub::Rejected],
+    );
+    let t0 = Instant::now();
+    let (esp, sink) = run(&mut rpc, &mut waiter, move || t0);
+    assert_eq!(waiter.waited, 0);
+    assert_eq!(esp.rotates, 0);
+    assert!(sink.shown.is_empty());
+    assert!(sink.cleared);
+}
+
+#[test]
+fn eof_resubscribes_and_keeps_watching() {
+    // herdr closes a stream that fell behind (`events_lost`); the watcher
+    // must resubscribe even though the pane set is unchanged.
+    let mut rpc = FakeRpc::new(vec![List::Panes(true, A); 4]);
+    let mut waiter = FakeWaiter::new(vec![Wake::Eof, Wake::Stop], vec![]);
+    let t0 = Instant::now();
+    let (esp, _sink) = run(&mut rpc, &mut waiter, move || t0);
+    assert_eq!(waiter.attempts, vec![ids(A), ids(A)]);
+    assert_eq!(waiter.waited, 2);
+    assert_eq!(rpc.i, 4);
+    assert_eq!(esp.rotates, 1);
+}
+
+#[test]
+fn eof_with_herdr_gone_exits() {
+    let mut rpc = FakeRpc::new(vec![List::Panes(true, A); 3]);
+    let mut waiter = FakeWaiter::new(vec![Wake::Eof, Wake::Stop], vec![Sub::Ok, Sub::Unreachable]);
+    let t0 = Instant::now();
+    let (esp, sink) = run(&mut rpc, &mut waiter, move || t0);
+    assert_eq!(waiter.waited, 1);
+    assert_eq!(esp.kills, 1);
+    assert!(sink.cleared);
+}
+
+#[test]
+fn rapid_eofs_exit_instead_of_spinning() {
+    let mut rpc = FakeRpc::new(vec![List::Panes(true, A); 6]);
+    let mut waiter = FakeWaiter::new(vec![Wake::Eof, Wake::Eof, Wake::Stop], vec![]);
+    let t0 = Instant::now();
+    let (_esp, sink) = run(&mut rpc, &mut waiter, move || t0);
+    assert_eq!(waiter.attempts.len(), 2); // initial + one resubscribe
+    assert_eq!(waiter.waited, 2);
+    assert!(sink.cleared);
 }
