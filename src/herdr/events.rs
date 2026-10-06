@@ -4,6 +4,7 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use super::rpc::{reply_error, request_line, HerdrError};
+use crate::consts::SUBSCRIBE_ACK_TIMEOUT;
 use serde_json::{json, Value};
 
 /// What woke a `Waiter`.
@@ -73,6 +74,12 @@ impl SocketEvents {
         // here rather than look like a healthy stream that never speaks. Bytes
         // the BufReader reads past the ack are events we drop — harmless, the
         // caller snapshots right after subscribing.
+        if let Err(e) = stream.set_read_timeout(Some(SUBSCRIBE_ACK_TIMEOUT)) {
+            // Tolerate EINVAL: the peer has already closed (e.g. in tests after sending reply).
+            if e.raw_os_error() != Some(libc::EINVAL) {
+                return Err(HerdrError::Io(e));
+            }
+        }
         let mut reader = BufReader::new(&stream);
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
@@ -85,6 +92,12 @@ impl SocketEvents {
         reply_error(&ack)?;
         // We never parse event payloads — any pushed bytes just mean
         // "re-snapshot" — so from here on poll()+drain handle the stream.
+        if let Err(e) = stream.set_read_timeout(None) {
+            // Tolerate EINVAL: the peer has closed (timeout occurred or connection was reset).
+            if e.raw_os_error() != Some(libc::EINVAL) {
+                return Err(HerdrError::Io(e));
+            }
+        }
         stream.set_nonblocking(true)?;
         Ok(Self { stream })
     }
@@ -93,7 +106,7 @@ impl SocketEvents {
         self.stream.as_raw_fd()
     }
 
-    /// Consume all currently-available bytes (ack and/or events) so `poll()`
+    /// Consume all currently-available bytes (pushed events) so `poll()`
     /// won't immediately re-fire. Returns `false` on EOF (herdr closed).
     fn drain(&mut self) -> bool {
         let mut buf = [0u8; 4096];

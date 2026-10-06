@@ -5,11 +5,13 @@
 //! the resulting `invalid_metadata_request` error reply was discarded. Field
 //! names and error handling are now pinned against a stub of herdr's socket.
 
+use herdr_espresso::consts::SUBSCRIBE_ACK_TIMEOUT;
 use herdr_espresso::herdr::{Rpc, SocketEvents, SocketRpc};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::sync::mpsc;
 use std::thread;
+use std::time::Instant;
 
 /// A stub of herdr's API socket: one request per connection, answered with a
 /// scripted reply, then closed — same contract as the real server. Returns the
@@ -166,4 +168,47 @@ fn rejected_subscription_is_an_error() {
         .expect("error ack must not look like a live stream");
     assert!(format!("{err:?}").contains("pane_not_found"));
     let _ = std::fs::remove_file(&sock);
+}
+
+#[test]
+fn subscription_timeout_if_herdr_accepts_but_never_acks() {
+    // A listener that accepts the connection and reads the request but never
+    // sends a reply. The subscribe call should timeout waiting for the ack.
+    let path = std::env::temp_dir().join(format!("he-rpc-{}-timeout.sock", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).expect("bind stub socket");
+
+    let path_clone = path.to_string_lossy().into_owned();
+    thread::spawn(move || {
+        if let Ok(conn) = listener.accept() {
+            let (stream, _addr) = conn;
+            // Read the request line but never send a reply; hold the connection open.
+            let mut line = String::new();
+            let _ = BufReader::new(&stream).read_line(&mut line);
+            // Keep the connection open for 10 seconds (longer than SUBSCRIBE_ACK_TIMEOUT).
+            std::thread::sleep(std::time::Duration::from_secs(10));
+        }
+    });
+
+    let start = Instant::now();
+    let err = SocketEvents::subscribe(&path.to_string_lossy().into_owned(), &["w1:p1".to_string()])
+        .err()
+        .expect("timeout must surface as an error");
+    let elapsed = start.elapsed();
+
+    // Should timeout within SUBSCRIBE_ACK_TIMEOUT + a small margin.
+    assert!(
+        elapsed >= SUBSCRIBE_ACK_TIMEOUT,
+        "timeout took {} s, expected at least {:?}",
+        elapsed.as_secs_f64(),
+        SUBSCRIBE_ACK_TIMEOUT
+    );
+    assert!(
+        elapsed < SUBSCRIBE_ACK_TIMEOUT + std::time::Duration::from_secs(2),
+        "timeout took {} s, expected at most {:?} + 2s",
+        elapsed.as_secs_f64(),
+        SUBSCRIBE_ACK_TIMEOUT
+    );
+    assert!(format!("{err:?}").contains("Io") || format!("{err:?}").contains("timeout"));
+    let _ = std::fs::remove_file(&path_clone);
 }
