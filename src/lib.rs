@@ -4,5 +4,6 @@ pub mod herdr;
 pub mod policy;
 pub mod state;
 pub mod status;
+pub mod store;
 pub mod toggle;
 pub mod watcher;

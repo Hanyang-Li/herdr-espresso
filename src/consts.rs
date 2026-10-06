@@ -8,6 +8,11 @@ pub const METADATA_SOURCE: &str = "espresso";
 pub const MARKER_TOKEN: &str = "espresso";
 pub const MARKER: &str = "espresso"; // the token's displayed text
 
+// Tab bar status line (Nerd Font: md-coffee U+F0176, md-coffee_outline U+F06CA).
+// Shown while the switch is on; with the switch off there is no line at all.
+pub const STATUS_AWAKE: &str = "\u{F0176} awake";
+pub const STATUS_IDLE: &str = "\u{F06CA} idle";
+
 pub const LEASE: Duration = Duration::from_secs(90);
 pub const RENEW_INTERVAL: Duration = Duration::from_secs(60);
 pub const STOP_GRACE: Duration = Duration::from_secs(5);
