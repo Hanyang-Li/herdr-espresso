@@ -1,6 +1,6 @@
 use herdr_espresso::consts::{STATUS_AWAKE, STATUS_IDLE};
 use herdr_espresso::espresso::{EspressoCtl, EspressoError};
-use herdr_espresso::herdr::{HerdrError, PaneState, Rpc, Snapshot, Waiter, Wake};
+use herdr_espresso::herdr::{HerdrError, Rpc, Snapshot, Waiter, Wake};
 use herdr_espresso::watcher::{run_loop, StatusSink};
 use std::time::{Duration, Instant};
 
@@ -26,16 +26,6 @@ impl FakeRpc {
     }
 }
 impl Rpc for FakeRpc {
-    // Old per-pane methods, still on the trait; Task 5 removes them.
-    fn pane_state(&mut self, _id: &str) -> Result<PaneState, HerdrError> {
-        unimplemented!()
-    }
-    fn set_marker(&mut self, _id: &str) -> Result<(), HerdrError> {
-        unimplemented!()
-    }
-    fn clear_marker(&mut self, _id: &str) -> Result<(), HerdrError> {
-        unimplemented!()
-    }
     fn snapshot(&mut self) -> Result<Snapshot, HerdrError> {
         let step = self
             .script

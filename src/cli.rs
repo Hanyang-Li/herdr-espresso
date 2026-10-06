@@ -9,11 +9,10 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Toggle monitoring for the focused pane ($HERDR_PANE_ID).
+    /// Turn the global keep-awake monitor on or off.
     Toggle,
-    /// Internal: per-pane watcher (spawned detached by `toggle`).
+    /// Restore the monitor after herdr starts (manifest `[[startup]]` hook).
+    Startup,
     #[command(hide = true)]
-    Watch { pane_id: String },
-    /// List currently monitored panes.
-    Status,
+    Watch,
 }

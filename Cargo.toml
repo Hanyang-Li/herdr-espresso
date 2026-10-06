@@ -1,8 +1,8 @@
 [package]
 name = "herdr-espresso"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Keep macOS awake (incl. lid-closed) while a herdr pane's agent is working."
+description = "Keep macOS awake (incl. lid-closed) while any herdr agent is working."
 license = "MIT"
 
 [lib]

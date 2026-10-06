@@ -105,12 +105,12 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id() as i32;
-        assert!(crate::state::pid_alive(pid));
+        assert!(crate::store::pid_alive(pid));
         kill_pid(pid);
         // give the kernel a moment
         std::thread::sleep(std::time::Duration::from_millis(50));
         let _ = child.wait();
-        assert!(!crate::state::pid_alive(pid));
+        assert!(!crate::store::pid_alive(pid));
     }
 
     #[test]

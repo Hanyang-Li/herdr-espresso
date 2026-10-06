@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# bin/startup
+exec "${HERDR_PLUGIN_ROOT:?}/target/release/herdr-espresso" startup "$@"

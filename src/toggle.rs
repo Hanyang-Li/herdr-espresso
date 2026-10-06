@@ -1,120 +1,70 @@
-use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use crate::consts::PLUGIN_ID;
+use crate::control::{self, Spawn};
+use crate::herdr::{self, Rpc, SocketRpc};
+use crate::store::StateDir;
 
-use crate::herdr::{PaneState, Rpc};
-use crate::{herdr, state};
-
+/// Turn the global keep-awake monitor on or off. Decided by whether a watcher
+/// is actually running, not by the `enabled` file: a watcher that died leaves
+/// the tab bar empty (looks off), and one press must turn it back on.
 pub fn toggle() -> i32 {
-    let Some(pane_id) = herdr::focused_pane_id() else {
-        eprintln!("no focused pane (HERDR_PANE_ID unset)");
-        return 1;
-    };
+    let dir = StateDir::from_env();
+    control::sweep_legacy(&dir);
 
-    if let Some(pid) = state::read_pidfile(&pane_id) {
-        if state::pid_alive(pid) {
-            unsafe {
-                libc::kill(pid, libc::SIGTERM);
-            }
-            state::remove_pidfile(&pane_id);
-            println!("espresso: monitoring off for {pane_id}");
-            return 0;
+    if let Some(pid) = control::live_watcher(&dir) {
+        if let Err(e) = dir.set_enabled(false) {
+            eprintln!("herdr-espresso: clear enabled failed: {e}");
         }
-        state::remove_pidfile(&pane_id); // stale
+        control::stop_watcher(&dir, pid);
+        notify("espresso off", "No longer keeping the Mac awake.");
+        println!("espresso: off");
+        return 0;
     }
 
-    // Toggle ON. Require an agent in the focused pane: a plain shell has
-    // nothing to monitor (its status is always "unknown"), so decline with a
-    // notification instead of creating a useless watcher.
+    if let Err(e) = dir.set_enabled(true) {
+        eprintln!("herdr-espresso: set enabled failed: {e}");
+        return 1;
+    }
+    match control::spawn_watcher(&dir) {
+        Spawn::Started(_) => {
+            notify(
+                "espresso on",
+                "Keeping the Mac awake while any agent works.",
+            );
+            if !crate::espresso::daemon_installed() {
+                notify(
+                    &format!("{PLUGIN_ID}: lid-closed not active"),
+                    "Run `espresso daemon install` for lid-closed keep-awake.",
+                );
+            }
+            println!("espresso: on");
+            0
+        }
+        Spawn::AlreadyRunning => {
+            println!("espresso: already on");
+            0
+        }
+        Spawn::Failed => {
+            let _ = dir.set_enabled(false);
+            eprintln!(
+                "herdr-espresso: watcher failed to start, see {}",
+                dir.log_path().display()
+            );
+            1
+        }
+    }
+}
+
+/// Best-effort toast; toggling works the same when herdr cannot show it.
+fn notify(title: &str, body: &str) {
     let Some(sock) = herdr::socket_path() else {
-        eprintln!("HERDR_SOCKET_PATH not set");
-        return 1;
+        return;
     };
-    let mut rpc = match herdr::SocketRpc::connect(&sock) {
-        Ok(r) => r,
-        Err(_) => {
-            eprintln!("could not reach herdr socket");
-            return 1;
-        }
-    };
-    match rpc.pane_state(&pane_id) {
-        Ok(PaneState::Agent(_)) => {}
-        Ok(PaneState::NoAgent) => {
-            let _ = rpc.notify("espresso", "This pane has no agent — nothing to monitor.");
-            return 0;
-        }
-        Ok(PaneState::Gone) | Err(_) => {
-            let _ = rpc.notify("espresso", "Could not read the focused pane.");
-            return 1;
-        }
-    }
-
-    // Atomically claim the pidfile so a concurrent toggle-on can't spawn a
-    // second, orphaned watcher that would hold espresso indefinitely.
-    match state::try_reserve_pidfile(&pane_id) {
-        state::Reserve::Reserved => {}
-        state::Reserve::Busy => {
-            println!("espresso: monitoring already on for {pane_id}");
-            return 0;
-        }
-        state::Reserve::Failed => return 1,
-    }
-
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => {
-            state::remove_pidfile(&pane_id);
-            return 1;
-        }
-    };
-    let log = state::state_dir().join(format!("{}.log", state::sanitize_pane_id(&pane_id)));
-
-    // Default both streams to null: a detached watcher must NEVER inherit the
-    // caller's tty (Command's default for an unset stream is inherit()).
-    // Upgrade to the log file only when it is fully available.
-    let mut cmd = Command::new(exe);
-    cmd.arg("watch")
-        .arg(&pane_id)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if let Ok(f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log)
-    {
-        match f.try_clone() {
-            Ok(f2) => {
-                cmd.stdout(Stdio::from(f));
-                cmd.stderr(Stdio::from(f2));
-            }
-            Err(_) => {
-                cmd.stdout(Stdio::from(f)); // stderr stays null
+    match SocketRpc::connect(&sock) {
+        Ok(mut rpc) => {
+            if let Err(e) = rpc.notify(title, body) {
+                eprintln!("herdr-espresso: notify failed: {e:?}");
             }
         }
+        Err(e) => eprintln!("herdr-espresso: notify failed: {e:?}"),
     }
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    let child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(_) => {
-            state::remove_pidfile(&pane_id);
-            return 1;
-        }
-    };
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    let pid = child.id() as i32;
-    if !state::pid_alive(pid) {
-        state::remove_pidfile(&pane_id);
-        return 1;
-    }
-    if state::write_pidfile(&pane_id, pid).is_err() {
-        state::remove_pidfile(&pane_id);
-        return 1;
-    }
-    println!("espresso: monitoring on for {pane_id}");
-    0
 }

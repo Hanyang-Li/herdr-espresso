@@ -115,6 +115,7 @@ impl StateDir {
         let lock_file = match std::fs::OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false)
             .open(&lock_path)
         {
             Ok(f) => f,
