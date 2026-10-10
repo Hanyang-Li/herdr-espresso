@@ -13,6 +13,6 @@ command = ["bash", "bin/startup"]
 
 [[actions]]
 id = "toggle"
-title = "Espresso: toggle global keep-awake"
+title = "Espresso: cycle keep-awake (auto / forced / off)"
 contexts = ["global", "workspace", "pane"]
 command = ["bash", "bin/toggle"]

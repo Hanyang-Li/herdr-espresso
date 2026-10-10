@@ -19,13 +19,14 @@
   `espresso`；开关仍保持开启，任一 agent 再次活跃时会重新持有。
 - **整个 herdr 一个开关。** 开一次即可，覆盖所有 workspace、tab 和 pane（包括之后新开的），
   herdr 重启后依然生效。
+- **强制模式。** 再按一次快捷键，即可不管 agent 状态、一直保持唤醒，直到关闭为止。
 
 ## 特性
 
 - **跟随每个 agent。** 无需按 pane 设置——之后出现的 pane 和 agent 会被自动接管。
-- **标签栏状态。** 开关开启时，herdr 标签栏右侧显示 `󰅶 awake` / `󰛊 idle`，关闭时不显示
+- **标签栏状态。** 开关开启时，herdr 标签栏右侧显示 `󰅶 awake` / `󰛊 idle` / `󰅷 forced`，关闭时不显示
   ——只需在 herdr 配置里加一行（见[标签栏状态](#标签栏状态)）。
-- **记住开关。** 开启后，herdr 重启也会自动恢复为开启。
+- **记住开关。** 开启后，herdr 重启也会自动恢复为开启，并保持原来的模式。
 - **自愈租约。** `espresso` 以短租约方式持有、agent 工作期间不断续租，因此崩溃的
   watcher 绝不会一直占着 Mac 不睡——租约会在 ~90 秒内自动到期。
 - **事件驱动。** watcher 空闲时阻塞在内核里、几乎 0% CPU；toggle 关闭是瞬时的。
@@ -64,11 +65,21 @@ herdr plugin install Hanyang-Li/herdr-espresso --ref v1.0.0
 key = "prefix+/"
 type = "plugin_action"
 command = "espresso.toggle"
-description = "espresso: toggle global keep-awake"
+description = "espresso: cycle keep-awake (auto / forced / off)"
 ```
 
-在任意位置按下它，即可为整个 herdr 开启或关闭保持唤醒。每次切换都会弹出 toast 提示。
-该 action 也会出现在 herdr 的命令面板里，名为 **Espresso: toggle global keep-awake**。
+在任意位置按下它，即可让整个 herdr 的保持唤醒在三种模式间循环切换：
+
+**关闭 → 自动 → 强制 → 关闭**
+
+| 模式 | 行为 |
+|---|---|
+| **自动（auto）** | 任一 agent 在 working 或 blocked 时保持唤醒，全部空闲后允许睡眠。 |
+| **强制（forced）** | 不管 agent 在做什么都保持唤醒，直到关闭。 |
+| **关闭（off）** | 不持有任何唤醒。 |
+
+每次切换都会弹出 toast 提示。该 action 也会出现在 herdr 的命令面板里，名为
+**Espresso: cycle keep-awake (auto / forced / off)**。
 
 ## 标签栏状态
 
@@ -84,11 +95,13 @@ tab_bar_right = [
 
 | 显示 | 含义 |
 |---|---|
-| `󰅶 awake` | 已开启，且至少一个 agent 在 working 或 blocked——Mac 保持唤醒。 |
-| `󰛊 idle` | 已开启，所有 agent 都空闲——Mac 可以睡眠。 |
+| `󰅶 awake` | 自动模式，且至少一个 agent 在 working 或 blocked——Mac 保持唤醒。 |
+| `󰛊 idle` | 自动模式，所有 agent 都空闲——Mac 可以睡眠。 |
+| `󰅷 forced` | 强制模式——不管 agent 状态，Mac 保持唤醒。 |
 | *（不显示）* | 已关闭。 |
 
-图标是 Nerd Font 字形（md-coffee、md-coffee_outline），终端需使用 Nerd Font。如果设置了
+图标是 Nerd Font 字形（md-coffee、md-coffee_outline、md-coffee_to_go），终端需使用
+Nerd Font。herdr 会剥掉标签栏 command 输出里的颜色等样式，所以各模式靠字形和文案区分。如果设置了
 `XDG_STATE_HOME`，该文件则位于 `$XDG_STATE_HOME/herdr/plugins/espresso/statusline`。
 其他条目（`datetime`、`hostname` 等）可以放在同一个列表里。
 
@@ -109,9 +122,11 @@ tab_bar_right = [
   agent 处于活跃状态就每 60 秒续租（轮换）一次，因此保持无空档。
 - **全部 idle/done → 宽限后释放。** 没有 agent 活跃后，watcher 等约 5 秒（避免瞬时闪回
   working 反复起停）再释放 `espresso`。开关保持开启。
+- **强制模式不看 agent。** 强制模式下 watcher 全程持有并续租；它保留订阅只是为了感知
+  herdr 退出。从自动切到强制会替换 watcher，唤醒只会中断几毫秒。
 - **自愈租约。** 因为租约短且靠续租维持，watcher 若意外死亡（崩溃、`kill -9`）也无法
   一直占着 Mac 不睡——其 `espresso` 租约会在 ~90 秒内到期。
-- **重启安全。** 开关记录在 herdr 的插件状态目录里；herdr server 启动时，插件的启动钩子
+- **重启安全。** 开关及其模式记录在 herdr 的插件状态目录里；herdr server 启动时，插件的启动钩子
   会把 watcher 拉起来。detach 掉客户端不受影响；`herdr server stop` 会结束它。
   toggle 与启动都会先获取一把锁（`watcher.lock`），因此不会互相竞争。
 

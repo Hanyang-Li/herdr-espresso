@@ -1,12 +1,12 @@
 use crate::consts::{LOCK_WAIT, PLUGIN_ID};
 use crate::control::{self, Spawn};
 use crate::herdr::{self, Rpc, SocketRpc};
-use crate::store::StateDir;
+use crate::store::{Mode, StateDir};
 
-/// Turn the global keep-awake monitor on or off. Decided by whether a watcher
-/// is actually running, not by the `enabled` file: a watcher that died can
-/// leave `enabled` set (and possibly a stale tab bar line), and one press must
-/// turn it back on.
+/// Cycle global keep-awake: off → auto → forced → off. "Off" is decided by
+/// whether a watcher is actually running, not by the `enabled` file: a watcher
+/// that died can leave `enabled` set (and possibly a stale tab bar line), and
+/// one press must turn it back on.
 pub fn toggle() -> i32 {
     let dir = StateDir::from_env();
     // Held for the whole stop-or-spawn, so a second press (or startup) waits
@@ -24,39 +24,57 @@ pub fn toggle() -> i32 {
     };
     control::sweep_legacy(&dir);
 
-    if let Some(pid) = control::live_watcher(&dir) {
-        if let Err(e) = dir.set_enabled(false) {
-            eprintln!("herdr-espresso: clear enabled failed: {e}");
+    let live = control::live_watcher(&dir);
+    let next = match live {
+        None => Mode::Auto,
+        Some(pid) if dir.mode() == Some(Mode::Forced) => {
+            if let Err(e) = dir.set_mode(None) {
+                eprintln!("herdr-espresso: clear enabled failed: {e}");
+            }
+            control::stop_watcher(&lock, &dir, pid);
+            drop(lock);
+            notify("espresso off", "No longer keeping the Mac awake.");
+            println!("espresso: off");
+            return 0;
         }
-        control::stop_watcher(&lock, &dir, pid);
-        drop(lock);
-        notify("espresso off", "No longer keeping the Mac awake.");
-        println!("espresso: off");
-        return 0;
-    }
+        Some(_) => Mode::Forced,
+    };
 
-    if let Err(e) = dir.set_enabled(true) {
+    // Auto → forced replaces the watcher; the new one takes its espresso lease
+    // right after it is ready, so the hold gap is a few milliseconds.
+    if let Some(pid) = live {
+        control::stop_watcher(&lock, &dir, pid);
+    }
+    if let Err(e) = dir.set_mode(Some(next)) {
         eprintln!("herdr-espresso: set enabled failed: {e}");
         return 1;
     }
-    match control::spawn_watcher(&lock, &dir) {
+    match control::spawn_watcher(&lock, &dir, next) {
         Spawn::Started(_) => {
             drop(lock);
-            notify(
-                "espresso on",
-                "Keeping the Mac awake while any agent works.",
-            );
-            if !crate::espresso::daemon_installed() {
-                notify(
-                    &format!("{PLUGIN_ID}: lid-closed not active"),
-                    "Run `espresso daemon install` for lid-closed keep-awake.",
-                );
+            match next {
+                Mode::Auto => {
+                    notify(
+                        "espresso auto",
+                        "Keeping the Mac awake while any agent works.",
+                    );
+                    if !crate::espresso::daemon_installed() {
+                        notify(
+                            &format!("{PLUGIN_ID}: lid-closed not active"),
+                            "Run `espresso daemon install` for lid-closed keep-awake.",
+                        );
+                    }
+                }
+                Mode::Forced => notify(
+                    "espresso forced",
+                    "Keeping the Mac awake until switched off.",
+                ),
             }
-            println!("espresso: on");
+            println!("espresso: {}", next.as_str());
             0
         }
         Spawn::Failed => {
-            let _ = dir.set_enabled(false);
+            let _ = dir.set_mode(None);
             drop(lock);
             eprintln!(
                 "herdr-espresso: watcher failed to start, see {}",

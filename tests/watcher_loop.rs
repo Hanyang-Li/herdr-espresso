@@ -1,4 +1,4 @@
-use herdr_espresso::consts::{STATUS_AWAKE, STATUS_IDLE};
+use herdr_espresso::consts::{STATUS_AWAKE, STATUS_FORCED, STATUS_IDLE};
 use herdr_espresso::espresso::{EspressoCtl, EspressoError};
 use herdr_espresso::herdr::{HerdrError, Rpc, Snapshot, Waiter, Wake};
 use herdr_espresso::watcher::{run_loop, StatusSink};
@@ -172,10 +172,30 @@ fn run_ready(
     waiter: &mut FakeWaiter,
     clock: impl FnMut() -> Instant,
 ) -> (FakeEsp, FakeSink, u32) {
+    run_mode(rpc, waiter, clock, false)
+}
+
+/// Like `run`, in forced mode.
+fn run_forced(
+    rpc: &mut FakeRpc,
+    waiter: &mut FakeWaiter,
+    clock: impl FnMut() -> Instant,
+) -> (FakeEsp, FakeSink, u32) {
+    run_mode(rpc, waiter, clock, true)
+}
+
+fn run_mode(
+    rpc: &mut FakeRpc,
+    waiter: &mut FakeWaiter,
+    clock: impl FnMut() -> Instant,
+    forced: bool,
+) -> (FakeEsp, FakeSink, u32) {
     let mut esp = FakeEsp::default();
     let mut sink = FakeSink::default();
     let mut ready = 0;
-    run_loop(rpc, waiter, &mut esp, &mut sink, clock, || ready += 1);
+    run_loop(rpc, waiter, &mut esp, &mut sink, clock, forced, || {
+        ready += 1
+    });
     (esp, sink, ready)
 }
 
@@ -388,7 +408,53 @@ fn ready_fires_once_and_before_the_first_lease() {
         &mut esp,
         &mut sink,
         move || t0,
+        false,
         || l2.borrow_mut().push("ready"),
     );
     assert_eq!(*log.borrow(), vec!["ready", "rotate"]);
+}
+
+#[test]
+fn forced_holds_while_every_agent_is_idle() {
+    let mut rpc = FakeRpc::new(vec![List::Panes(false, A); 3]);
+    let mut waiter = FakeWaiter::new(vec![Wake::Event, Wake::Timeout, Wake::Stop], vec![]);
+    let (esp, sink, ready) = run_forced(&mut rpc, &mut waiter, advancing());
+    assert_eq!(ready, 1);
+    assert!(esp.rotates >= 1);
+    // Never released by the stop-grace timer: only the cleanup kill.
+    assert_eq!(esp.kills, 1);
+    assert_eq!(sink.shown, vec![STATUS_FORCED]);
+    assert!(sink.cleared);
+}
+
+#[test]
+fn forced_holds_even_when_the_first_list_is_rejected() {
+    let mut rpc = FakeRpc::new(vec![List::Panes(false, A), List::Rejected]);
+    let mut waiter = FakeWaiter::new(vec![Wake::Stop], vec![]);
+    let t0 = Instant::now();
+    let (esp, sink, ready) = run_forced(&mut rpc, &mut waiter, move || t0);
+    assert_eq!(ready, 1);
+    assert_eq!(esp.rotates, 1);
+    assert_eq!(sink.shown, vec![STATUS_FORCED]);
+}
+
+#[test]
+fn forced_renews_the_lease() {
+    // The advancing clock passes the 60 s renew deadline within a few steps.
+    let mut rpc = FakeRpc::new(vec![List::Panes(false, A); 2]);
+    let wakes = vec![Wake::Timeout; 10];
+    let mut waiter = FakeWaiter::new(wakes, vec![]);
+    let (esp, _sink, _) = run_forced(&mut rpc, &mut waiter, advancing());
+    assert!(esp.rotates >= 2, "rotates = {}", esp.rotates);
+}
+
+#[test]
+fn forced_still_exits_when_herdr_is_gone() {
+    let mut rpc = FakeRpc::new(vec![List::Panes(false, A), List::Panes(false, A)]);
+    let mut waiter = FakeWaiter::new(vec![Wake::Event], vec![]);
+    let t0 = Instant::now();
+    let (esp, sink, _) = run_forced(&mut rpc, &mut waiter, move || t0);
+    assert_eq!(waiter.waited, 1);
+    assert_eq!(esp.kills, 1);
+    assert!(sink.cleared);
 }

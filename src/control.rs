@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::consts::{READY_POLL, READY_TIMEOUT, STOP_WAIT};
-use crate::store::{pid_alive, read_pid_at, ControlLock, StateDir};
+use crate::store::{pid_alive, read_pid_at, ControlLock, Mode, StateDir};
 
 const EXE_NAME: &str = "herdr-espresso";
 
@@ -73,10 +73,10 @@ pub enum Spawn {
     Failed,
 }
 
-/// Start the detached global watcher and wait until it reports ready by
-/// writing its own pidfile (after it has subscribed to herdr). The caller holds
-/// the control lock and has already dealt with any live watcher.
-pub fn spawn_watcher(_lock: &ControlLock, dir: &StateDir) -> Spawn {
+/// Start the detached global watcher in `mode` and wait until it reports ready
+/// by writing its own pidfile (after it has subscribed to herdr). The caller
+/// holds the control lock and has already dealt with any live watcher.
+pub fn spawn_watcher(_lock: &ControlLock, dir: &StateDir, mode: Mode) -> Spawn {
     // A stale pidfile must not be mistaken for the new watcher's readiness.
     dir.remove_pid();
     let Ok(exe) = std::env::current_exe() else {
@@ -87,8 +87,11 @@ pub fn spawn_watcher(_lock: &ControlLock, dir: &StateDir) -> Spawn {
     // caller's tty (Command's default for an unset stream is inherit()).
     // Upgrade to the log file, truncated per start, when it is available.
     let mut cmd = Command::new(exe);
-    cmd.arg("watch")
-        .stdin(Stdio::null())
+    cmd.arg("watch");
+    if mode == Mode::Forced {
+        cmd.arg("--forced");
+    }
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     if let Ok(f) = std::fs::OpenOptions::new()

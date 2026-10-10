@@ -3,7 +3,8 @@ use crate::control::{self, Spawn};
 use crate::store::StateDir;
 
 /// The manifest's `[[startup]]` hook: herdr runs it once the server is up,
-/// including after a live handoff. Restores the switch from `enabled`.
+/// including after a live handoff. Restores the switch, in its mode, from
+/// `enabled`.
 pub fn startup() -> i32 {
     let dir = StateDir::from_env();
     let lock = match dir.lock(LOCK_WAIT) {
@@ -26,13 +27,13 @@ pub fn startup() -> i32 {
         control::stop_watcher(&lock, &dir, pid);
     }
 
-    if !dir.enabled() {
+    let Some(mode) = dir.mode() else {
         // Leftovers from a watcher that was killed hard.
         dir.remove_statusline();
         dir.remove_pid();
         return 0;
-    }
-    match control::spawn_watcher(&lock, &dir) {
+    };
+    match control::spawn_watcher(&lock, &dir, mode) {
         Spawn::Started(_) => 0,
         Spawn::Failed => {
             eprintln!(

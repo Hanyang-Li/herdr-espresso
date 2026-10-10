@@ -2,10 +2,13 @@ use std::time::Duration;
 
 pub const PLUGIN_ID: &str = "espresso";
 
-// Tab bar status line (Nerd Font: md-coffee U+F0176, md-coffee_outline U+F06CA).
-// Shown while the switch is on; with the switch off there is no line at all.
+// Tab bar status line (Nerd Font: md-coffee U+F0176, md-coffee_outline U+F06CA,
+// md-coffee_to_go U+F0177). Shown while the switch is on; with the switch off
+// there is no line at all. herdr strips styling from tab bar output, so modes
+// differ by glyph and text, not color.
 pub const STATUS_AWAKE: &str = "\u{F0176} awake";
 pub const STATUS_IDLE: &str = "\u{F06CA} idle";
+pub const STATUS_FORCED: &str = "\u{F0177} forced";
 
 pub const LEASE: Duration = Duration::from_secs(90);
 pub const RENEW_INTERVAL: Duration = Duration::from_secs(60);

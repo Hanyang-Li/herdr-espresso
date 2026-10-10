@@ -54,3 +54,16 @@ fn startup_while_on_without_herdr_fails_and_keeps_the_switch() {
     assert!(!dir.join("statusline").exists());
     assert!(!dir.join("watcher.pid").exists());
 }
+
+#[test]
+fn startup_in_forced_mode_without_herdr_keeps_the_mode() {
+    let dir = state_dir("startup-forced");
+    std::fs::write(dir.join("enabled"), "forced").unwrap();
+    let out = run("startup", &dir);
+    assert!(!out.status.success());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("enabled")).unwrap(),
+        "forced"
+    );
+    assert!(!dir.join("watcher.pid").exists());
+}

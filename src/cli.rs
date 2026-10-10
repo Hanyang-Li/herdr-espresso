@@ -9,10 +9,14 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Turn the global keep-awake monitor on or off.
+    /// Cycle global keep-awake: off → auto → forced → off.
     Toggle,
     /// Restore the monitor after herdr starts (manifest `[[startup]]` hook).
     Startup,
     #[command(hide = true)]
-    Watch,
+    Watch {
+        /// Keep awake regardless of agent status.
+        #[arg(long)]
+        forced: bool,
+    },
 }

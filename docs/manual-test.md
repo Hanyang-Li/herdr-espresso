@@ -24,7 +24,7 @@ the automated tests stub out. Run them on macOS.
    key = "prefix+/"
    type = "plugin_action"
    command = "espresso.toggle"
-   description = "espresso: toggle global keep-awake"
+   description = "espresso: cycle keep-awake (auto / forced / off)"
 
    [ui]
    tab_bar_right = [
@@ -36,8 +36,9 @@ the automated tests stub out. Run them on macOS.
 
 ## Checklist
 
-- [ ] **1. Toggle on.** Press `prefix+/` with any pane focused (a plain shell is
-      fine). An `espresso on` toast appears, `$STATE/enabled` and
+- [ ] **1. Toggle on (auto).** Press `prefix+/` with any pane focused (a plain
+      shell is fine). An `espresso auto` toast appears, `$STATE/enabled` reads
+      `auto`, `$STATE/enabled` and
       `$STATE/watcher.pid` exist, and within ~2 s the tab bar shows `󰛊 idle`
       (or `󰅶 awake` if an agent is already working).
 
@@ -58,36 +59,44 @@ the automated tests stub out. Run them on macOS.
       `󰅶 awake` — the watcher picked up a pane that did not exist when it
       started.
 
-- [ ] **6. Toggle off.** Press `prefix+/` again. An `espresso off` toast
+- [ ] **6. Auto → forced.** With the switch in auto and every agent idle,
+      press `prefix+/`. An `espresso forced` toast appears, `$STATE/enabled`
+      reads `forced`, `$STATE/watcher.pid` names a new process, the tab bar
+      shows `󰅷 forced`, and an espresso assertion is held. Agents going
+      working/idle change nothing; the assertion is still held after 2+ minutes
+      (the lease is renewed).
+
+- [ ] **7. Forced → off.** Press `prefix+/` again. An `espresso off` toast
       appears, the tab bar entry disappears, `$STATE/enabled`,
       `$STATE/watcher.pid` and `$STATE/statusline` are gone, and no espresso
       assertion remains.
 
-- [ ] **7. Double press.** With the switch off, press `prefix+/` twice in quick
-      succession. The result is "on, then off": the entry appears briefly (or
-      not at all) and ends hidden, `$STATE/watcher.pid` is gone, and
+- [ ] **8. Rapid presses.** With the switch off, press `prefix+/` three times in
+      quick succession. The result is "auto, forced, off": the entry ends
+      hidden, `$STATE/watcher.pid` is gone, and
       `ps aux | grep "herdr-espresso watch"` shows no watcher left running.
 
-- [ ] **8. Restart restores the switch.** Toggle on, then `herdr server stop`
+- [ ] **9. Restart restores the switch.** Toggle on, then `herdr server stop`
       and start herdr again. Without pressing anything the tab bar comes back
       (`󰛊 idle` / `󰅶 awake`) and `$STATE/watcher.pid` names a new live
-      process. Repeat with the switch off: after the restart the entry stays
+      process. Repeat in forced mode: it comes back as `󰅷 forced`. Repeat with the
+      switch off: after the restart the entry stays
       hidden and no watcher runs.
 
-- [ ] **9. Watcher crash self-heals.** With an agent working, `kill -9` the pid
+- [ ] **10. Watcher crash self-heals.** With an agent working, `kill -9` the pid
       in `$STATE/watcher.pid`. The espresso assertion is *not* dropped at once
       but expires within ~90 s. The tab bar may keep showing the stale line
       until the next toggle or herdr start; pressing `prefix+/` once starts a
       fresh watcher (a dead watcher counts as off).
 
-- [ ] **10. Upgrade from 0.1 cleans up.** With 0.1 installed, monitor a pane so
+- [ ] **11. Upgrade from 0.1 cleans up.** With 0.1 installed, monitor a pane so
       its sidebar shows `espresso`. Link 1.0 and press `prefix+/`. The old
       per-pane watcher exits, the sidebar marker disappears, and
       `$STATE/*.pid` contains only `watcher.pid`.
 
-- [ ] **11. Missing-daemon reminder.** Without `espresso daemon install`, toggle
+- [ ] **12. Missing-daemon reminder.** Without `espresso daemon install`, toggle
       on: a toast tells you to run `espresso daemon install` for lid-closed
       keep-awake.
 
-- [ ] **12. Idle CPU.** With the switch on and several panes open but idle,
+- [ ] **13. Idle CPU.** With the switch on and several panes open but idle,
       `top -pid <watcher pid>` shows ~0% CPU.

@@ -22,16 +22,18 @@ socket and holds (or releases) an `espresso` session accordingly.
   the next time any agent becomes active.
 - **One switch for all of herdr.** Toggle it once; it covers every workspace,
   tab and pane, including ones opened later, and survives herdr restarts.
+- **Forced mode.** Press the key again to keep the Mac awake regardless of
+  agent status, until you switch it off.
 
 ## Features
 
 - **Follows every agent.** No per-pane setup — panes and agents that appear
   later are picked up automatically.
-- **Tab bar status.** `󰅶 awake` / `󰛊 idle` on the right of herdr's tab bar while
-  the switch is on, nothing while it is off — one line of herdr config away
+- **Tab bar status.** `󰅶 awake` / `󰛊 idle` / `󰅷 forced` on the right of herdr's
+  tab bar while the switch is on, nothing while it is off — one line of herdr config away
   (see [Tab bar status](#tab-bar-status)).
-- **Remembers the switch.** Turned on, it comes back on by itself after herdr
-  restarts.
+- **Remembers the switch.** Turned on, it comes back on by itself — in the same
+  mode — after herdr restarts.
 - **Self-healing.** `espresso` is held via a short lease renewed while agents
   work, so a crashed watcher can never pin the Mac awake — the lease expires on
   its own within ~90s.
@@ -74,12 +76,21 @@ the `espresso.toggle` action, for example:
 key = "prefix+/"
 type = "plugin_action"
 command = "espresso.toggle"
-description = "espresso: toggle global keep-awake"
+description = "espresso: cycle keep-awake (auto / forced / off)"
 ```
 
-Press it anywhere to switch keep-awake on or off for all of herdr. A toast
-confirms each switch. The action is also listed in herdr's command palette as
-**Espresso: toggle global keep-awake**.
+Press it anywhere to cycle keep-awake for all of herdr through three modes:
+
+**off → auto → forced → off**
+
+| Mode | Behavior |
+|---|---|
+| **auto** | Awake while any agent is working or blocked, may sleep once all are idle. |
+| **forced** | Awake no matter what the agents are doing, until switched off. |
+| **off** | Nothing is held. |
+
+A toast confirms each switch. The action is also listed in herdr's command
+palette as **Espresso: cycle keep-awake (auto / forced / off)**.
 
 ## Tab bar status
 
@@ -95,12 +106,14 @@ tab_bar_right = [
 
 | Shown | Meaning |
 |---|---|
-| `󰅶 awake` | On, and at least one agent is working or blocked — the Mac stays awake. |
-| `󰛊 idle` | On, all agents idle — the Mac may sleep. |
+| `󰅶 awake` | Auto, and at least one agent is working or blocked — the Mac stays awake. |
+| `󰛊 idle` | Auto, all agents idle — the Mac may sleep. |
+| `󰅷 forced` | Forced — the Mac stays awake regardless of agents. |
 | *(nothing)* | Off. |
 
-The icons are Nerd Font glyphs (md-coffee, md-coffee_outline); use a Nerd Font
-in your terminal. If you set `XDG_STATE_HOME`, the file lives at
+The icons are Nerd Font glyphs (md-coffee, md-coffee_outline, md-coffee_to_go);
+use a Nerd Font in your terminal. herdr strips colors and other styling from
+tab bar command output, so the modes are told apart by glyph and text. If you set `XDG_STATE_HOME`, the file lives at
 `$XDG_STATE_HOME/herdr/plugins/espresso/statusline` instead. Other entries
 (`datetime`, `hostname`, …) can sit alongside it in the same list.
 
@@ -125,10 +138,15 @@ or herdr reports it in `herdr server reload-config` diagnostics.
 - **All idle/done → release after grace.** Once no agent is active, the watcher
   waits ~5 seconds (so a brief flip back to active doesn't thrash it) before
   releasing `espresso`. The switch stays on.
+- **Forced ignores agents.** In forced mode the watcher holds and renews the
+  lease the whole time; it stays subscribed only to notice herdr exiting.
+  Switching auto → forced replaces the watcher, so the hold is dropped for only
+  a few milliseconds.
 - **Self-healing lease.** Because the lease is short and renewed rather than
   held open-ended, a watcher that dies unexpectedly (crash, `kill -9`) can't
   keep the Mac awake — its `espresso` lease expires within ~90 seconds.
-- **Restart-safe.** The switch is remembered in herdr's plugin state dir; when
+- **Restart-safe.** The switch and its mode are remembered in herdr's plugin
+  state dir; when
   the herdr server starts, the plugin's startup hook brings the watcher back.
   Detaching a client doesn't affect it; `herdr server stop` ends it. Toggle and
   startup take a lock (`watcher.lock`) so they never race each other.

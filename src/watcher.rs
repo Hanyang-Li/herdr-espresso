@@ -1,7 +1,7 @@
 use std::os::unix::net::UnixStream;
 use std::time::Instant;
 
-use crate::consts::{RESUBSCRIBE_MIN_GAP, STATUS_AWAKE, STATUS_IDLE, SYNC_ROUNDS};
+use crate::consts::{RESUBSCRIBE_MIN_GAP, STATUS_AWAKE, STATUS_FORCED, STATUS_IDLE, SYNC_ROUNDS};
 use crate::espresso::{EspressoCtl, EspressoError};
 use crate::herdr::{HerdrError, Rpc, Waiter, Wake};
 use crate::policy::{Action, Machine};
@@ -41,12 +41,16 @@ enum Synced {
 /// Global event loop. Blocks in the `Waiter` (kernel `poll()`) until herdr
 /// pushes an event, the stop signal fires, or a timer deadline elapses — no
 /// periodic polling. Every event triggers a fresh `pane.list` snapshot.
+///
+/// `forced` ignores agent status and holds espresso the whole time; the
+/// subscription then only serves to notice herdr going away.
 pub fn run_loop<R: Rpc, W: Waiter, C: EspressoCtl, S: StatusSink>(
     rpc: &mut R,
     waiter: &mut W,
     esp: &mut C,
     sink: &mut S,
     mut now: impl FnMut() -> Instant,
+    forced: bool,
     on_ready: impl FnOnce(),
 ) {
     let mut machine = Machine::new();
@@ -62,6 +66,11 @@ pub fn run_loop<R: Rpc, W: Waiter, C: EspressoCtl, S: StatusSink>(
     if !matches!(first, Synced::Stop) {
         on_ready();
     }
+    let first = match first {
+        Synced::Stop => Synced::Stop,
+        _ if forced => Synced::Active(true),
+        other => other,
+    };
     let mut running = match first {
         Synced::Active(active) => {
             let n = now();
@@ -73,7 +82,7 @@ pub fn run_loop<R: Rpc, W: Waiter, C: EspressoCtl, S: StatusSink>(
         Synced::Stop => false,
     };
     if running {
-        render(esp, sink, &mut shown);
+        render(esp, sink, &mut shown, forced);
     }
 
     while running {
@@ -109,7 +118,7 @@ pub fn run_loop<R: Rpc, W: Waiter, C: EspressoCtl, S: StatusSink>(
             Synced::Stop => running = false,
             Synced::Active(active) => {
                 let n = now();
-                let acts = machine.on_status(active, n);
+                let acts = machine.on_status(active || forced, n);
                 apply(&acts, esp, rpc, &mut machine, n, &mut warned_missing);
             }
             Synced::Keep => {}
@@ -120,7 +129,7 @@ pub fn run_loop<R: Rpc, W: Waiter, C: EspressoCtl, S: StatusSink>(
             let n = now();
             let acts = machine.on_timer(n);
             apply(&acts, esp, rpc, &mut machine, n, &mut warned_missing);
-            render(esp, sink, &mut shown);
+            render(esp, sink, &mut shown, forced);
         }
     }
 
@@ -173,11 +182,18 @@ fn sync<R: Rpc, W: Waiter>(
     latest
 }
 
-fn render<C: EspressoCtl, S: StatusSink>(esp: &C, sink: &mut S, shown: &mut Option<&'static str>) {
-    let want = if esp.is_up() {
-        STATUS_AWAKE
-    } else {
-        STATUS_IDLE
+fn render<C: EspressoCtl, S: StatusSink>(
+    esp: &C,
+    sink: &mut S,
+    shown: &mut Option<&'static str>,
+    forced: bool,
+) {
+    // Forced with espresso down (e.g. not on PATH) shows idle: the line
+    // reports whether the Mac is actually held awake.
+    let want = match (esp.is_up(), forced) {
+        (true, true) => STATUS_FORCED,
+        (true, false) => STATUS_AWAKE,
+        (false, _) => STATUS_IDLE,
     };
     if *shown != Some(want) {
         sink.show(want);
@@ -216,15 +232,15 @@ fn apply<R: Rpc, C: EspressoCtl>(
     }
 }
 
-pub fn watch() -> i32 {
+pub fn watch(forced: bool) -> i32 {
     let dir = StateDir::from_env();
-    let code = run_watcher(&dir);
+    let code = run_watcher(&dir, forced);
     // Only our own pidfile: a replacement watcher may already have claimed it.
     dir.remove_pid_if(std::process::id() as i32);
     code
 }
 
-fn run_watcher(dir: &StateDir) -> i32 {
+fn run_watcher(dir: &StateDir, forced: bool) -> i32 {
     // Self-pipe for instant toggle-off: the SIGTERM handler writes a byte to
     // `sig_write`; the watcher's poll() wakes on `sig_read` and cleans up at
     // once — no periodic flag-polling, no wakeup latency.
@@ -258,6 +274,7 @@ fn run_watcher(dir: &StateDir) -> i32 {
         &mut esp,
         &mut sink,
         Instant::now,
+        forced,
         || {
             if let Err(e) = dir.write_pid(own) {
                 eprintln!("herdr-espresso: cannot write pidfile: {e}");

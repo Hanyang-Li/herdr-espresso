@@ -23,6 +23,32 @@ pub fn read_pid_at(path: &Path) -> Option<i32> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
+/// What the switch is set to while on. Persisted as the `enabled` file's
+/// content; 1.0 wrote it empty, which reads as `Auto`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Keep awake while any agent is working or blocked.
+    Auto,
+    /// Keep awake regardless of agent status.
+    Forced,
+}
+
+impl Mode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Auto => "auto",
+            Mode::Forced => "forced",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s.trim() {
+            "forced" => Mode::Forced,
+            _ => Mode::Auto,
+        }
+    }
+}
+
 fn remove_quietly(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
@@ -68,15 +94,24 @@ impl StateDir {
         self.path(ENABLED).exists()
     }
 
-    pub fn set_enabled(&self, on: bool) -> std::io::Result<()> {
-        if on {
-            std::fs::create_dir_all(&self.root)?;
-            std::fs::write(self.path(ENABLED), b"")
-        } else {
-            match std::fs::remove_file(self.path(ENABLED)) {
+    /// The persisted mode, or `None` while the switch is off.
+    pub fn mode(&self) -> Option<Mode> {
+        std::fs::read_to_string(self.path(ENABLED))
+            .ok()
+            .map(|s| Mode::parse(&s))
+    }
+
+    /// Turn the switch on in `mode`, or off with `None`.
+    pub fn set_mode(&self, mode: Option<Mode>) -> std::io::Result<()> {
+        match mode {
+            Some(mode) => {
+                std::fs::create_dir_all(&self.root)?;
+                std::fs::write(self.path(ENABLED), mode.as_str())
+            }
+            None => match std::fs::remove_file(self.path(ENABLED)) {
                 Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
                 other => other,
-            }
+            },
         }
     }
 
@@ -180,15 +215,28 @@ mod tests {
     }
 
     #[test]
-    fn enabled_flag_roundtrip() {
+    fn mode_roundtrip() {
         let dir = temp_dir("enabled");
         assert!(!dir.enabled());
-        dir.set_enabled(true).unwrap();
+        assert_eq!(dir.mode(), None);
+        dir.set_mode(Some(Mode::Auto)).unwrap();
         assert!(dir.enabled());
-        dir.set_enabled(false).unwrap();
+        assert_eq!(dir.mode(), Some(Mode::Auto));
+        dir.set_mode(Some(Mode::Forced)).unwrap();
+        assert_eq!(dir.mode(), Some(Mode::Forced));
+        dir.set_mode(None).unwrap();
         assert!(!dir.enabled());
+        assert_eq!(dir.mode(), None);
         // Turning off twice is not an error.
-        dir.set_enabled(false).unwrap();
+        dir.set_mode(None).unwrap();
+    }
+
+    #[test]
+    fn empty_enabled_file_from_1_0_reads_as_auto() {
+        let dir = temp_dir("enabled-1.0");
+        std::fs::create_dir_all(dir.root()).unwrap();
+        std::fs::write(dir.root().join("enabled"), "").unwrap();
+        assert_eq!(dir.mode(), Some(Mode::Auto));
     }
 
     #[test]
