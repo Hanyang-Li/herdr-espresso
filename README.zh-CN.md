@@ -53,7 +53,7 @@ herdr 会克隆仓库、执行构建钩子（`cargo build --release`）并注册
 锁定具体版本：
 
 ```sh
-herdr plugin install Hanyang-Li/herdr-espresso --ref v1.0.0
+herdr plugin install Hanyang-Li/herdr-espresso --ref v1.1.0
 ```
 
 ## 键位绑定

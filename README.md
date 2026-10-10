@@ -63,7 +63,7 @@ herdr clones the repo, runs the build hook (`cargo build --release`), and
 registers the plugin. Pin a specific version with `--ref`:
 
 ```sh
-herdr plugin install Hanyang-Li/herdr-espresso --ref v1.0.0
+herdr plugin install Hanyang-Li/herdr-espresso --ref v1.1.0
 ```
 
 ## Keybinding
